@@ -269,12 +269,6 @@ genModel' _ globals = do
         }
   pure (a, maybe (error "fromJust") id $ traverse (filterFeatures $ FeatureTag ValueFeatureTag_AnyOutput $ ScriptFeatureTag_PlutusV1) b)
 
-shrinkModelSimple ::
-  forall a.
-  (a, [ModelEpoch AllModelFeatures]) ->
-  [(a, [ModelEpoch AllModelFeatures])]
-shrinkModelSimple (genesis, epochs) = (,) genesis <$> tail (List.init $ ([] :) $ List.inits epochs)
-
 simulateChainModel ::
   (KnownScriptFeature (ScriptFeature era)) =>
   [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)] ->
@@ -420,6 +414,46 @@ generateOneExample = do
   _mresult <- time "modelApp" $ pure $ simulateChainModel a b
   result <- time "elaborate" $ pure $ fst $ chainModelInteractionWith proxy a b
   print result
+
+shrinkModelTransactions ::
+  [ModelTx era] ->
+  [[ModelTx era]]
+shrinkModelTransactions txns = List.inits txns
+
+newPrevList ::
+  [a] ->
+  [a] ->
+  [a]
+newPrevList [] prevA = prevA
+newPrevList a prevA = prevA <> ((:) (List.last a) [])
+
+shrinkModelBlocks ::
+  [ModelBlock era] ->
+  [ModelBlock era] ->
+  [[ModelBlock era]]
+shrinkModelBlocks [] _ = []
+shrinkModelBlocks ((ModelBlock slotNo txns) : blocks) prevBlocks =
+  let currentBlockPrefixes = (ModelBlock slotNo) <$> (shrinkModelTransactions txns)
+      currentBPrefixList = (flip (:) []) <$> currentBlockPrefixes
+      allBlockPrefixes = ((<>) prevBlocks) <$> currentBPrefixList
+  in allBlockPrefixes <> (shrinkModelBlocks blocks $ newPrevList currentBlockPrefixes prevBlocks)
+
+shrinkModelEpochs ::
+  [ModelEpoch AllModelFeatures] ->
+  [ModelEpoch AllModelFeatures] ->
+  [[ModelEpoch AllModelFeatures]]
+shrinkModelEpochs [] _ = []
+shrinkModelEpochs ((ModelEpoch blocks blocksMade) : epochs) prevEpochs =
+  let currentEpochPrefixes = (flip ModelEpoch blocksMade) <$> (shrinkModelBlocks blocks [])
+      currentEpochPrefixList = (flip (:) []) <$> currentEpochPrefixes
+      allEpochPrefixes = ((<>) prevEpochs) <$> currentEpochPrefixList
+  in allEpochPrefixes <> (shrinkModelEpochs epochs $ newPrevList currentEpochPrefixes prevEpochs)
+
+shrinkModelSimple
+  :: forall a.
+      (a, [ModelEpoch AllModelFeatures])
+  -> [(a, [ModelEpoch AllModelFeatures])]
+shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEpochs epochs [])
 
 -- | some hand-written model based unit tests
 modelUnitTests ::
