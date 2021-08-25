@@ -25,6 +25,7 @@ import Cardano.Ledger.Coin
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Mary.Value (AssetName (..))
 import Cardano.Ledger.Shelley (ShelleyEra)
+import Cardano.Slotting.Slot (SlotNo (..))
 import Control.DeepSeq
 import Control.Lens
 import qualified Control.Monad.State.Strict as State
@@ -43,6 +44,7 @@ import Data.Ratio ((%))
 import qualified Data.Set as Set
 import Data.String (IsString (..))
 import Data.Typeable
+import GHC.Exts (fromList)
 import GHC.Generics
 import GHC.Natural
 import qualified PlutusTx
@@ -252,8 +254,10 @@ genModel' ::
   proxy era ->
   Globals ->
   Gen
-    ( [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
-      [ModelEpoch AllModelFeatures]
+    ( Bool,
+      ( [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
+        [ModelEpoch AllModelFeatures]
+      )
     )
 genModel' _ globals = do
   (a, b) <-
@@ -267,7 +271,7 @@ genModel' _ globals = do
           _genActionContexts_txnsPerSlot = frequency [(1, pure 1), (10, choose (2, 15))],
           _genActionContexts_numSlotsUsed = choose (2, 15)
         }
-  pure (a, maybe (error "fromJust") id $ traverse (filterFeatures $ FeatureTag ValueFeatureTag_AnyOutput $ ScriptFeatureTag_PlutusV1) b)
+  pure (False, (a, maybe (error "fromJust") id $ traverse (filterFeatures $ FeatureTag ValueFeatureTag_AnyOutput $ ScriptFeatureTag_PlutusV1) b))
 
 simulateChainModel ::
   (KnownScriptFeature (ScriptFeature era)) =>
@@ -388,7 +392,7 @@ modelGenTest ::
   proxy era ->
   Property
 modelGenTest proxy =
-  forAllShrink (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) (const []) $ \(a, b) ->
+  forAllShrink (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) shrinkModel $ \(_ :: Bool, (a, b)) ->
     ( execPropertyWriter $ do
         tellProperty $ counterexample ("numPools: " <> show (lengthOf (traverse . modelDCerts . _ModelDelegate) b))
         tellProperty $ propModelStats b
@@ -409,7 +413,7 @@ generateOneExample :: IO ()
 generateOneExample = do
   let proxy = (Proxy :: Proxy (AlonzoEra C_Crypto))
       proxy' = eraFeatureSet proxy
-  (a, b) <- time "generate" $ generate $ genModel' proxy' testGlobals
+  (_ :: Bool, (a, b)) <- time "generate" $ generate $ genModel' proxy' testGlobals
   time "examine" $ print $ examineModel b
   _mresult <- time "modelApp" $ pure $ simulateChainModel a b
   result <- time "elaborate" $ pure $ fst $ chainModelInteractionWith proxy a b
@@ -436,7 +440,7 @@ shrinkModelBlocks ((ModelBlock slotNo txns) : blocks) prevBlocks =
   let currentBlockPrefixes = (ModelBlock slotNo) <$> (shrinkModelTransactions txns)
       currentBPrefixList = (flip (:) []) <$> currentBlockPrefixes
       allBlockPrefixes = ((<>) prevBlocks) <$> currentBPrefixList
-  in allBlockPrefixes <> (shrinkModelBlocks blocks $ newPrevList currentBlockPrefixes prevBlocks)
+   in allBlockPrefixes <> (shrinkModelBlocks blocks $ newPrevList currentBlockPrefixes prevBlocks)
 
 shrinkModelEpochs ::
   [ModelEpoch AllModelFeatures] ->
@@ -447,13 +451,50 @@ shrinkModelEpochs ((ModelEpoch blocks blocksMade) : epochs) prevEpochs =
   let currentEpochPrefixes = (flip ModelEpoch blocksMade) <$> (shrinkModelBlocks blocks [])
       currentEpochPrefixList = (flip (:) []) <$> currentEpochPrefixes
       allEpochPrefixes = ((<>) prevEpochs) <$> currentEpochPrefixList
-  in allEpochPrefixes <> (shrinkModelEpochs epochs $ newPrevList currentEpochPrefixes prevEpochs)
+   in allEpochPrefixes <> (shrinkModelEpochs epochs $ newPrevList currentEpochPrefixes prevEpochs)
 
-shrinkModelSimple
-  :: forall a.
-      (a, [ModelEpoch AllModelFeatures])
-  -> [(a, [ModelEpoch AllModelFeatures])]
-shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEpochs epochs [])
+-- | Shrink the epochs down to txns and each element will have its own prefix of txns, including all txns that came before
+shrinkModelSimple ::
+  forall a.
+  (a, [ModelEpoch AllModelFeatures]) ->
+  [(a, [ModelEpoch AllModelFeatures])]
+shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEpochs epochs)
+  where
+    getBlockPrefixes ::
+      ModelBlock era ->
+      [ModelBlock era]
+    getBlockPrefixes (ModelBlock slotNo txns) = (ModelBlock slotNo) <$> (List.inits txns)
+
+    getEpochPrefixes ::
+      ModelEpoch AllModelFeatures ->
+      [ModelEpoch AllModelFeatures]
+    getEpochPrefixes (ModelEpoch blocks blocksMade) =
+      let blockPrefixes = snd $ foldl (appendPrefixes getBlockPrefixes) ([], []) blocks
+       in (flip ModelEpoch blocksMade) <$> blockPrefixes
+
+    -- This function produces a tuple
+    -- The first value is to keep track of any previous blocks/epochs
+    -- The second value is the previous blocks/epochs plus the prefixes of each block/epochs
+    appendPrefixes ::
+      (b -> [b]) ->
+      ([b], [[b]]) ->
+      b ->
+      ([b], [[b]])
+    appendPrefixes getPrefixsFn (accumulatedXs, prefixList) x =
+      let addPrevXsFn = (++) accumulatedXs
+          newPrefixes = addPrevXsFn <$> (pure <$> (getPrefixsFn x))
+       in (accumulatedXs ++ [x], prefixList ++ newPrefixes)
+
+    shrinkModelEpochs ::
+      [ModelEpoch AllModelFeatures] ->
+      [[ModelEpoch AllModelFeatures]]
+    shrinkModelEpochs epochs = snd $ foldl (appendPrefixes getEpochPrefixes) ([], []) epochs
+
+shrinkPhases :: (a -> [a]) -> (a -> [a]) -> (Bool, a) -> [(Bool, a)]
+shrinkPhases f g (False, x) = ((,) True) <$> (f x)
+shrinkPhases f g (True, x) = ((,) True) <$> (g x)
+
+shrinkModel = shrinkPhases shrinkModelSimple (const [])
 
 -- | some hand-written model based unit tests
 modelUnitTests ::
