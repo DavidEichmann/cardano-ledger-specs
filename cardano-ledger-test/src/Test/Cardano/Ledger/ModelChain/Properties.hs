@@ -490,11 +490,18 @@ shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEp
       [[ModelEpoch AllModelFeatures]]
     shrinkModelEpochs epochs = snd $ foldl (appendPrefixes getEpochPrefixes) ([], []) epochs
 
-shrinkPhases :: (a -> [a]) -> (a -> [a]) -> (Bool, a) -> [(Bool, a)]
-shrinkPhases f g (False, x) = ((,) True) <$> (f x)
-shrinkPhases f g (True, x) = ((,) True) <$> (g x)
+shrinkDiscardUnnecessaryTxns ::
+  forall a.
+  (a, [ModelEpoch AllModelFeatures]) ->
+  (a, [ModelEpoch AllModelFeatures])
+shrinkDiscardUnnecessaryTxns (genesis, epochs) = undefined
 
-shrinkModel = shrinkPhases shrinkModelSimple (const [])
+
+shrinkPhases :: (a -> [a]) -> (a -> [a]) -> (Bool, a) -> [(Bool, a)]
+shrinkPhases f _ (False, x) = ((,) True) <$> (f x)
+shrinkPhases _ g (True, x) = ((,) True) <$> (g x)
+
+shrinkModel = shrinkPhases shrinkModelSimple (const [])--shrinkDiscardUnnecessaryTxns
 
 -- | some hand-written model based unit tests
 modelUnitTests ::
@@ -511,6 +518,10 @@ modelUnitTests proxy =
   testGroup
     (show $ typeRep proxy)
     [ testProperty "gen" $ checkCoverage $ modelGenTest proxy,
+      testProperty "DPAKS TEST" $ forAllShrink (pure generatedEpochs) shrinkModel $ \(_ :: Bool, (a, b)) -> conjoin
+      [ testChainModelInteraction proxy a b
+      ]
+      ,
       testProperty "noop" $ testChainModelInteraction proxy [] [],
       testProperty "noop-2" $
         testChainModelInteraction
@@ -812,6 +823,10 @@ modelUnitTests proxy =
               mempty
           ]
     ]
+
+generatedEpochs :: (Bool, ([(ModelUTxOId, ModelAddress k, Coin)], [ModelEpoch AllModelFeatures]))
+generatedEpochs = undefined
+
 
 modelUnitTests_ :: TestTree
 modelUnitTests_ =
