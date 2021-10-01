@@ -224,7 +224,7 @@ genDCert = do
 genWdrl :: GenModelM st era m => m (Set (ModelAddress (ScriptFeature era)))
 genWdrl = do
   allRewards <- use (modelLedger . modelLedger_rewards)
-  rewards <- sublistOf $ Set.toList allRewards
+  rewards <- sublistOf $ Set.toList $ Map.keysSet $ unGrpMap allRewards
   pure $ Set.fromList rewards
 
 genModelTx :: forall era m st. GenModelM st era m => m (ModelTx era)
@@ -248,9 +248,10 @@ genModelTx = do
   dcerts <- do
     st0 <- modelLedger <<%= applyModelTx txn
     numDCerts <- liftGen =<< asks (_genActionContexts_numDCerts . snd)
+    txNo <- use (modelLedger . modelLedger_nextTxNo)
     dcerts <- replicateM numDCerts $ do
       dcert <- genDCert
-      modelLedger %= applyModelDCert dcert
+      modelLedger %= applyModelDCert txNo dcert
       pure dcert
 
     modelLedger .= st0

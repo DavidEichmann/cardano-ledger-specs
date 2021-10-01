@@ -40,12 +40,11 @@ import Control.DeepSeq
 import Control.Lens
 import Control.Monad
 import qualified Control.Monad.State.Strict as State
-import Data.Foldable (fold)
+import Data.Foldable (fold, for_)
 import Data.Group
 import Data.Kind (Type)
 import qualified Data.List as List
 import qualified Data.Map as Map
-import qualified Data.Map.Merge.Strict as Map
 import Data.Proxy
 import Data.Semigroup (Sum (..))
 import Data.Set (Set)
@@ -244,7 +243,7 @@ data ModelTx (era :: FeatureSet) = ModelTx
     _mtxMint :: !(IfSupportsMint () (ModelValue (ValueFeature era) era) (ValueFeature era)),
     _mtxCollateral :: !(IfSupportsPlutus () (Set ModelUTxOId) (ScriptFeature era))
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelTx era)
 
@@ -307,7 +306,7 @@ data ModelBlock era = ModelBlock
   { _modelBlock_slot :: SlotNo,
     _modelBlock_txSeq :: [ModelTx era]
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelBlock era)
 
@@ -334,7 +333,7 @@ instance Show ModelPoolId where
   showsPrec n (ModelPoolId x) = showsPrec n x
 
 newtype ModelBlocksMade = ModelBlocksMade {unModelBlocksMade :: Map.Map ModelPoolId Rational}
-  deriving (Generic, NFData)
+  deriving (Generic, NFData, Eq)
   deriving (Show) via Quiet ModelBlocksMade
   deriving (Semigroup) via GrpMap ModelPoolId (Sum Rational)
   deriving (Monoid) via GrpMap ModelPoolId (Sum Rational)
@@ -359,7 +358,7 @@ data ModelEpoch era = ModelEpoch
   { _modelEpoch_blocks :: [ModelBlock era],
     _modelEpoch_blocksMade :: ModelBlocksMade
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelEpoch era)
 
@@ -419,7 +418,7 @@ data ModelDCert era
   | ModelDelegate (ModelDelegation era)
   | ModelRegisterPool (ModelPoolParams era)
   | ModelRetirePool ModelPoolId EpochNo
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelDCert era)
 
@@ -483,9 +482,9 @@ type ModelLedgerInputs era =
   )
 
 data ModelSnapshot era = ModelSnapshot
-  { _modelSnapshot_stake :: Map.Map (ModelAddress (ScriptFeature era)) Coin,
-    _modelSnapshot_delegations :: Map.Map (ModelAddress (ScriptFeature era)) ModelPoolId,
-    _modelSnapshot_pools :: Map.Map ModelPoolId (ModelPoolParams era)
+  { _modelSnapshot_stake :: Map.Map (ModelAddress (ScriptFeature era)) (ModelUtxoMap era, ModelTxNo),
+    _modelSnapshot_delegations :: Map.Map (ModelAddress (ScriptFeature era)) (ModelPoolId, ModelTxNo),
+    _modelSnapshot_pools :: Map.Map ModelPoolId (ModelPoolParams era, ModelTxNo)
   }
   deriving (Eq, Generic)
   deriving (Show) via Quiet (ModelSnapshot era)
@@ -495,15 +494,15 @@ instance NFData (ModelSnapshot era)
 emptyModelSnapshot :: ModelSnapshot era
 emptyModelSnapshot = ModelSnapshot Map.empty Map.empty Map.empty
 
-modelSnapshot_stake :: Lens' (ModelSnapshot era) (Map.Map (ModelAddress (ScriptFeature era)) Coin)
+modelSnapshot_stake :: Lens' (ModelSnapshot era) (Map.Map (ModelAddress (ScriptFeature era)) (ModelUtxoMap era, ModelTxNo))
 modelSnapshot_stake a2fb s = (\b -> s {_modelSnapshot_stake = b}) <$> a2fb (_modelSnapshot_stake s)
 {-# INLINE modelSnapshot_stake #-}
 
-modelSnapshot_delegations :: Lens' (ModelSnapshot era) (Map.Map (ModelAddress (ScriptFeature era)) ModelPoolId)
+modelSnapshot_delegations :: Lens' (ModelSnapshot era) (Map.Map (ModelAddress (ScriptFeature era)) (ModelPoolId, ModelTxNo))
 modelSnapshot_delegations a2fb s = (\b -> s {_modelSnapshot_delegations = b}) <$> a2fb (_modelSnapshot_delegations s)
 {-# INLINE modelSnapshot_delegations #-}
 
-modelSnapshot_pools :: Lens' (ModelSnapshot era) (Map.Map ModelPoolId (ModelPoolParams era))
+modelSnapshot_pools :: Lens' (ModelSnapshot era) (Map.Map ModelPoolId (ModelPoolParams era, ModelTxNo))
 modelSnapshot_pools a2fb s = (\b -> s {_modelSnapshot_pools = b}) <$> a2fb (_modelSnapshot_pools s)
 {-# INLINE modelSnapshot_pools #-}
 
@@ -512,6 +511,15 @@ data ModelUtxoMap era = ModelUtxoMap
     _modelUtxoMap_balances :: GrpMap (ModelAddress (ScriptFeature era)) Coin
   }
   deriving (Eq, Show, Generic)
+
+instance Semigroup (ModelUtxoMap era) where
+  ModelUtxoMap utxos stake <> ModelUtxoMap utxos' stake' =
+    ModelUtxoMap
+      (Map.unionWith (\x y -> if x == y then x else error $ unwords ["unmergable ModelUtxoMap:", show x, "/=", show y]) utxos utxos')
+      (stake <> stake')
+
+instance Monoid (ModelUtxoMap era) where
+  mempty = ModelUtxoMap Map.empty mempty
 
 mkModelUtxoMap ::
   forall era.
@@ -569,12 +577,39 @@ instance At (ModelUtxoMap era) where
                 }
      in b2t <$> (a2fb $ fmap snd a)
 
+newtype ModelTxNo = ModelTxNo {unModelTxNo :: Integer}
+  deriving (Eq, NFData, Num, Ord, Show)
+
+data ModelRewardProvenanceDelegate = ModelRewardProvenanceDelegate
+  { _modelRewardProvenanceDelegate_stakeRegistration :: ModelTxNo,
+    _modelRewardProvenanceDelegate_poolRegistration :: ModelTxNo,
+    _modelRewardProvenanceDelegate_delegation :: ModelTxNo
+  }
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenanceDelegate
+
+data ModelRewardProvenancePool = ModelRewardProvenancePool
+  { _modelRewardProvenancePool_poolRegistration :: ModelTxNo
+  }
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenancePool
+
+data ModelRewardProvenance
+  = ModelRewardProvenance_Delegate ModelRewardProvenanceDelegate
+  | ModelRewardProvenance_Pool ModelRewardProvenancePool
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenance
+
 data ModelLedger era = ModelLedger
   { _modelLedger_utxos :: (ModelUtxoMap era),
     _modelLedger_stake :: (SnapshotQueue (ModelSnapshot era)),
     _modelLedger_epoch :: EpochNo,
-    _modelLedger_rewards :: (Set (ModelAddress (ScriptFeature era))),
-    _modelLedger_rewardUpdates :: (Set (ModelAddress (ScriptFeature era)))
+    _modelLedger_rewards :: GrpMap (ModelAddress (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance)),
+    _modelLedger_rewardUpdates :: GrpMap (ModelAddress (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance)),
+    _modelLedger_nextTxNo :: ModelTxNo
   }
   deriving (Eq, Show, Generic)
 
@@ -590,8 +625,9 @@ mkModelLedger utxos =
     { _modelLedger_utxos = mkModelUtxoMap utxos,
       _modelLedger_stake = pure emptyModelSnapshot,
       _modelLedger_epoch = 0,
-      _modelLedger_rewards = Set.empty,
-      _modelLedger_rewardUpdates = Set.empty
+      _modelLedger_rewards = mempty,
+      _modelLedger_rewardUpdates = mempty,
+      _modelLedger_nextTxNo = 0
     }
 
 class HasModelLedger era a | a -> era where
@@ -612,77 +648,126 @@ modelLedger_epoch :: Lens' (ModelLedger era) EpochNo
 modelLedger_epoch a2fb s = (\b -> s {_modelLedger_epoch = b}) <$> a2fb (_modelLedger_epoch s)
 {-# INLINE modelLedger_epoch #-}
 
-modelLedger_rewards :: Lens' (ModelLedger era) (Set (ModelAddress (ScriptFeature era)))
+modelLedger_rewards :: Lens' (ModelLedger era) (GrpMap (ModelAddress (ScriptFeature era)) ((Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))))
 modelLedger_rewards a2fb s = (\b -> s {_modelLedger_rewards = b}) <$> a2fb (_modelLedger_rewards s)
 {-# INLINE modelLedger_rewards #-}
 
-modelLedger_rewardUpdates :: Lens' (ModelLedger era) (Set (ModelAddress (ScriptFeature era)))
+modelLedger_rewardUpdates :: Lens' (ModelLedger era) (GrpMap (ModelAddress (ScriptFeature era)) ((Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))))
 modelLedger_rewardUpdates a2fb s = (\b -> s {_modelLedger_rewardUpdates = b}) <$> a2fb (_modelLedger_rewardUpdates s)
 {-# INLINE modelLedger_rewardUpdates #-}
 
+modelLedger_nextTxNo :: Lens' (ModelLedger era) ModelTxNo
+modelLedger_nextTxNo a2fb s = (\b -> s {_modelLedger_nextTxNo = b}) <$> a2fb (_modelLedger_nextTxNo s)
+
+getSubAddressforUtxoMap :: ModelUtxoMap era -> ModelAddress (ScriptFeature era) -> ModelUtxoMap era
+getSubAddressforUtxoMap (ModelUtxoMap utxos _) maddr = ifoldMap f utxos
+  where
+    f uid (_, u@(ModelTxOut maddr' _ _))
+      | maddr == maddr' = (at uid .~ Just u) mempty
+      | otherwise = mempty
+
 -- applyModelDCert :: ModelDCert era -> ModelSnapshot era -> ModelSnapshot era
-applyModelDCert :: ModelDCert era -> ModelLedger era -> ModelLedger era
-applyModelDCert =
+applyModelDCert :: ModelTxNo -> ModelDCert era -> ModelLedger era -> ModelLedger era
+applyModelDCert txNo dCert = State.execState $ do
+  utxosMap <- use modelLedger_utxos
   let mark = modelLedger_stake . snapshotQueue_mark
-   in State.execState . \case
-        ModelRegisterStake maddr -> mark . modelSnapshot_stake . at maddr .= Just mempty
-        ModelDeRegisterStake maddr -> do
-          mark . modelSnapshot_stake . at maddr .= Nothing
-          mark . modelSnapshot_delegations . at maddr .= Nothing
-        ModelDelegate (ModelDelegation maddr poolId) -> mark . modelSnapshot_delegations . at maddr .= Just poolId
-        ModelRegisterPool pool -> mark . modelSnapshot_pools . at (_mppId pool) .= Just pool
-        ModelRetirePool poolId _epochNo -> mark . modelSnapshot_pools . at poolId .= Nothing
+  case dCert of
+    ModelRegisterStake maddr -> mark . modelSnapshot_stake . at maddr .= Just (getSubAddressforUtxoMap utxosMap maddr, txNo)
+    ModelDeRegisterStake maddr -> do
+      mark . modelSnapshot_stake . at maddr .= Nothing
+      mark . modelSnapshot_delegations . at maddr .= Nothing
+    ModelDelegate (ModelDelegation maddr poolId) -> mark . modelSnapshot_delegations . at maddr .= Just (poolId, txNo)
+    ModelRegisterPool pool -> mark . modelSnapshot_pools . at (_mppId pool) .= Just (pool, txNo)
+    ModelRetirePool poolId _epochNo -> mark . modelSnapshot_pools . at poolId .= Nothing
 
 -- TODO: deal with epochNo
 
+spendStake ::
+  ModelUtxoMap era ->
+  Set ModelUTxOId ->
+  [(ModelUTxOId, ModelTxOut era)] ->
+  ModelSnapshot era ->
+  ModelSnapshot era
+spendStake utxosMap ins outs = State.execState $ do
+  for_ ins $ \ui -> do
+    let mUiOwner = utxosMap ^. at ui
+    for_ mUiOwner $ \(ModelTxOut uiOwner _ _) ->
+      modelSnapshot_stake . ix uiOwner . _1 %= spendModelUTxOs (Set.singleton ui) []
+
+  for_ outs $ \u@(_, (ModelTxOut uiOwner _ _)) -> do
+    modelSnapshot_stake . ix uiOwner . _1 %= spendModelUTxOs Set.empty [u]
+
 applyModelTx :: ModelTx era -> ModelLedger era -> ModelLedger era
 applyModelTx tx = State.execState $ do
+  utxosMap <- use modelLedger_utxos
+  modelLedger_stake . snapshotQueue_mark %= spendStake utxosMap (_mtxInputs tx) (_mtxOutputs tx)
   -- spend inputs/add outputs
   modelLedger_utxos %= spendModelUTxOs (_mtxInputs tx) (_mtxOutputs tx)
   -- withdraw rewards
-  modelLedger_rewards %= (`Set.difference` Map.keysSet (_mtxWdrl tx))
+  modelLedger_rewards . _GrpMap %= (`Map.difference` (_mtxWdrl tx))
+
+  txNo <- modelLedger_nextTxNo <+= 1
+
   -- apply certs
-  forOf_ (modelTx_dCert . traverse) tx $ State.modify . applyModelDCert
+  forOf_ (modelTx_dCert . traverse) tx $ State.modify . applyModelDCert txNo
 
 minStakeForRewards :: Coin
 minStakeForRewards = Coin 200
 
+getUtxoSetFromAddress :: ModelUtxoMap era -> Map.Map (ModelAddress (ScriptFeature era)) (Set ModelUTxOId)
+getUtxoSetFromAddress (ModelUtxoMap utxos _) = Map.fromListWith Set.union $ foldr grabPairs [] $ Map.toList utxos
+  where
+    grabPairs (utxo, (_, (ModelTxOut addr _ _))) xs = (addr, Set.singleton utxo) : xs
+
+getCoinUTxOsfromUTxoMap :: ModelUtxoMap era -> (Coin, Set ModelUTxOId)
+getCoinUTxOsfromUTxoMap (ModelUtxoMap utxos balances) = (fold balances, Map.keysSet utxos)
+
+getTotalDeposits :: ModelUtxoMap era -> Coin
+getTotalDeposits (ModelUtxoMap _ balances) = fold balances
+
 applyModelBlocksMade :: forall era. ModelBlocksMade -> ModelLedger era -> ModelLedger era
 applyModelBlocksMade (ModelBlocksMade blocksMade) = State.execState $ do
-  -- we don't actually keep the stake qty in the mark field up to date, we need
-  -- to compute it's correct value at the time of snapshot.
-  -- TODO: keep the stake qty up to date.
-  stakeMark ::
-    GrpMap (ModelAddress (ScriptFeature era)) Coin <-
-    uses modelLedger_utxos $ _modelUtxoMap_balances
-  modelLedger_stake . snapshotQueue_mark . modelSnapshot_stake
-    %= Map.merge
-      Map.dropMissing
-      (Map.mapMissing (\_ _ -> mempty))
-      (Map.zipWithMatched (\_ x _ -> x))
-      (unGrpMap stakeMark)
+  epochNo <- State.gets _modelLedger_epoch
 
   -- take a snapshot
   ModelSnapshot stakes' delegs' pools <- modelLedger_stake %%= shiftSnapshotQueue
 
-  let stakes :: GrpMap (ModelAddress (ScriptFeature era)) Coin
-      stakes = mkGrpMap stakes'
+  let stakes :: GrpMap (ModelAddress (ScriptFeature era)) (ModelUtxoMap era)
+      stakes = mkGrpMap $ fmap fst stakes'
       delegs :: GrpMap ModelPoolId (Coin, Set (ModelAddress (ScriptFeature era)))
-      delegs = ifoldMap (\addr poolId -> GrpMap . Map.singleton poolId $ (view (grpMap addr) stakes, Set.singleton addr)) delegs'
+      delegs = ifoldMap (\addr (poolId, _) -> GrpMap . Map.singleton poolId $ (getTotalDeposits (view (grpMap addr) stakes), Set.singleton addr)) delegs'
 
-      rewards :: Set (ModelAddress (ScriptFeature era))
-      rewards = flip ifoldMap (Map.intersectionWith (,) blocksMade pools) $ \poolId (blockWeight, pool) -> fold $ do
+      rewards :: GrpMap (ModelAddress (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))
+      rewards = flip ifoldMap (Map.intersectionWith (,) blocksMade pools) $ \poolId (blockWeight, (pool, poolRegistration)) -> fold $ do
         guard (blockWeight >= 0) -- only if the pool makes *some* number of blocks
         let (dstake, deleg) = view (grpMap poolId) delegs
         guard (dstake >= _mppPledge pool) -- and the pool met its pledge
-        let rewardAccts =
-              Map.keysSet $
-                Map.filter (>= minStakeForRewards) $ -- only if they have a minimum stake amount
+        let memberRewards, operatorRewards :: Map.Map (ModelAddress (ScriptFeature era)) (Set ModelUTxOId, ModelRewardProvenance)
+            memberRewards =
+              imap
+                ( \i (_, a) ->
+                    ( a,
+                      ModelRewardProvenance_Delegate $
+                        ModelRewardProvenanceDelegate
+                          (maybe (error "invalid stake registration") snd $ Map.lookup i stakes')
+                          poolRegistration
+                          (maybe (error "invalid delegation") snd $ Map.lookup i delegs')
+                    )
+                )
+                . Map.filter ((>= minStakeForRewards) . fst)
+                $ fmap getCoinUTxOsfromUTxoMap $ -- only if they have a minimum stake amount
                   Map.restrictKeys (unGrpMap stakes) deleg -- pay the delegates
+            operatorRewards =
+              Map.singleton
+                (_mppRAcnt pool)
+                ( Set.empty, -- TODO: All of the delegates staked
+                  ModelRewardProvenance_Pool $
+                    ModelRewardProvenancePool poolRegistration
+                )
             reward =
-              (if _mppMargin pool < maxBound then rewardAccts else Set.empty) -- pay delegates if margin is less than 100%
-                <> (if _mppMargin pool > minBound then Set.singleton (_mppRAcnt pool) else Set.empty) -- pay the pool if the margin is more than 0%
-        Just reward
+              (if _mppMargin pool < maxBound then memberRewards else Map.empty) -- pay delegates if margin is less than 100%
+                <> (if _mppMargin pool > minBound then operatorRewards else Map.empty) -- pay the pool if the margin is more than 0%
+        Just $ mkGrpMap $ fmap (Map.singleton (epochNo, poolId)) $ reward
 
   -- accumulate new rewards
   rewardUpdates <- modelLedger_rewardUpdates <<.= rewards

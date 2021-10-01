@@ -60,6 +60,7 @@ import qualified Control.Monad.State.Class as State
 import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Trans.State as State hiding (get, gets, state)
 import qualified Control.Monad.Writer as Writer
+import Data.Bool (bool)
 import Data.Default.Class
 import Data.Foldable
 import Data.Function (on)
@@ -983,6 +984,24 @@ class
               _txBodyArguments_redeemers = ifSupportsPlutus (Proxy @(EraScriptFeature era)) () SNothing,
               _txBodyArguments_collateral = cins
             }
+
+      let printLengths =
+            error
+              ( "ModelTx inputs length: " <> (show $ length mtxInputs)
+                  <> ", txBodyInputs length: "
+                  <> (show $ length $ _txBodyArguments_inputs txBodyArguments)
+                  <> ", ins: "
+                  <> (show mtxInputs)
+              )
+      bool (pure ()) printLengths $ (length mtxInputs) /= (length $ _txBodyArguments_inputs txBodyArguments)
+
+      let printOutputLengths =
+            error
+              ( "ModelTx outputs length: " <> (show $ length mtxOutputs)
+                  <> ", txBodyOutputs length: "
+                  <> (show $ length $ _txBodyArguments_outputs txBodyArguments)
+              )
+      bool (pure ()) printOutputLengths $ (length mtxOutputs) /= (length $ _txBodyArguments_outputs txBodyArguments)
 
       nes <- State.gets fst
       (realTxBody, txWitnessArguments) <- mkTxWitnessArguments nes txAccum txBodyArguments

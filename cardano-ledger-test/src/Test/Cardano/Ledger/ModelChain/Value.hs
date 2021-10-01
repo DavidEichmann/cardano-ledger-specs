@@ -19,7 +19,7 @@ module Test.Cardano.Ledger.ModelChain.Value where
 import Cardano.Ledger.Coin
 import Cardano.Ledger.Val hiding (invert)
 import Control.DeepSeq
-import Control.Lens (Lens', at, set)
+import Control.Lens (Iso', Lens', at, iso, set)
 import Control.Lens.Indexed (FoldableWithIndex (..), ifoldl)
 import Control.Monad
 import qualified Control.Monad.Except as Except
@@ -75,6 +75,9 @@ grpMapSingleton k v
 
 mkGrpMap :: (Eq v, Monoid v) => Map.Map k v -> GrpMap k v
 mkGrpMap = GrpMap . Map.filter (mempty /=)
+
+_GrpMap :: (Eq a, Monoid a) => Iso' (GrpMap k a) (Map.Map k a)
+_GrpMap = iso unGrpMap mkGrpMap
 
 grpMap :: (Ord k, Eq a, Monoid a) => k -> Lens' (GrpMap k a) a
 grpMap k a2fb (GrpMap s) = (\y -> GrpMap $ set (at k) (y <$ guard (y /= mempty)) s) <$> a2fb (maybe mempty id $ Map.lookup k s)

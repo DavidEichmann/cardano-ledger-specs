@@ -126,6 +126,8 @@ instance (NFData a, NFData b) => NFData (IfSupportsMint a b k) where
 
 deriving instance (Show a, Show b) => Show (IfSupportsMint a b k)
 
+deriving instance (Eq a, Eq b) => Eq (IfSupportsMint a b k)
+
 instance (Semigroup a, Semigroup b) => Semigroup (IfSupportsMint a b k) where
   NoMintSupport x <> NoMintSupport y = NoMintSupport (x <> y)
   SupportsMint x <> SupportsMint y = SupportsMint (x <> y)

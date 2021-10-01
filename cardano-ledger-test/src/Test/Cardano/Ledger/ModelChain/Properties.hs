@@ -7,6 +7,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NumDecimals #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -25,7 +26,6 @@ import Cardano.Ledger.Coin
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Mary.Value (AssetName (..))
 import Cardano.Ledger.Shelley (ShelleyEra)
-import Cardano.Slotting.Slot (SlotNo (..))
 import Control.DeepSeq
 import Control.Lens
 import qualified Control.Monad.State.Strict as State
@@ -44,7 +44,6 @@ import Data.Ratio ((%))
 import qualified Data.Set as Set
 import Data.String (IsString (..))
 import Data.Typeable
-import GHC.Exts (fromList)
 import GHC.Generics
 import GHC.Natural
 import qualified PlutusTx
@@ -392,13 +391,33 @@ modelGenTest ::
   proxy era ->
   Property
 modelGenTest proxy =
-  forAllShrink (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) shrinkModel $ \(_ :: Bool, (a, b)) ->
+  forAllShrink (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) (shrinkModel $ Proxy @(EraFeatureSet era)) $ \(_ :: Bool, (a, b)) ->
     ( execPropertyWriter $ do
         tellProperty $ counterexample ("numPools: " <> show (lengthOf (traverse . modelDCerts . _ModelDelegate) b))
         tellProperty $ propModelStats b
         -- tellProperty $ prop_simulateChainModel a b
     )
       (testChainModelInteractionWith proxy checkElaboratorResult a b)
+
+testModelShrinking ::
+  forall era proxy.
+  ( ElaborateEraModel era,
+    Default (AdditionalGenesisConfig era),
+    Show (PredicateFailure (Core.EraRule "LEDGER" era)),
+    Show (Core.Value era)
+  ) =>
+  proxy era ->
+  Property
+testModelShrinking proxy =
+  forAll (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) $ \(_ :: Bool, (a, b)) ->
+    let ab'@(a', b') = discardUnnecessaryTxns (Proxy @(EraFeatureSet era)) (a, b)
+        numBefore = (lengthOf (traverse . modelTxs)) b
+        numAfter = (lengthOf (traverse . modelTxs)) b'
+     in ( execPropertyWriter $ do
+            tellProperty $ cover 55 (numAfter < numBefore) "numAfter < numBefore"
+            tellProperty $ counterexample $ "shrunk result: ab'=" <> (show ab')
+        )
+          (testChainModelInteractionWith proxy checkElaboratorResult a' b')
 
 time :: NFData t => String -> IO t -> IO t
 time clue a = do
@@ -419,43 +438,9 @@ generateOneExample = do
   result <- time "elaborate" $ pure $ fst $ chainModelInteractionWith proxy a b
   print result
 
-shrinkModelTransactions ::
-  [ModelTx era] ->
-  [[ModelTx era]]
-shrinkModelTransactions txns = List.inits txns
-
-newPrevList ::
-  [a] ->
-  [a] ->
-  [a]
-newPrevList [] prevA = prevA
-newPrevList a prevA = prevA <> ((:) (List.last a) [])
-
-shrinkModelBlocks ::
-  [ModelBlock era] ->
-  [ModelBlock era] ->
-  [[ModelBlock era]]
-shrinkModelBlocks [] _ = []
-shrinkModelBlocks ((ModelBlock slotNo txns) : blocks) prevBlocks =
-  let currentBlockPrefixes = (ModelBlock slotNo) <$> (shrinkModelTransactions txns)
-      currentBPrefixList = (flip (:) []) <$> currentBlockPrefixes
-      allBlockPrefixes = ((<>) prevBlocks) <$> currentBPrefixList
-   in allBlockPrefixes <> (shrinkModelBlocks blocks $ newPrevList currentBlockPrefixes prevBlocks)
-
-shrinkModelEpochs ::
-  [ModelEpoch AllModelFeatures] ->
-  [ModelEpoch AllModelFeatures] ->
-  [[ModelEpoch AllModelFeatures]]
-shrinkModelEpochs [] _ = []
-shrinkModelEpochs ((ModelEpoch blocks blocksMade) : epochs) prevEpochs =
-  let currentEpochPrefixes = (flip ModelEpoch blocksMade) <$> (shrinkModelBlocks blocks [])
-      currentEpochPrefixList = (flip (:) []) <$> currentEpochPrefixes
-      allEpochPrefixes = ((<>) prevEpochs) <$> currentEpochPrefixList
-   in allEpochPrefixes <> (shrinkModelEpochs epochs $ newPrevList currentEpochPrefixes prevEpochs)
-
--- | Shrink the epochs down to txns and each element will have its own prefix of txns, including all txns that came before
+-- | Shrink the epochs down to txns and each element will have its own prefix of txns, including all txns that came before.
+-- This function also includes a prefix where there is a block with no transactions.
 shrinkModelSimple ::
-  forall a.
   (a, [ModelEpoch AllModelFeatures]) ->
   [(a, [ModelEpoch AllModelFeatures])]
 shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEpochs epochs)
@@ -474,34 +459,238 @@ shrinkModelSimple (genesis, epochs) = (,) genesis <$> (List.init $ shrinkModelEp
 
     -- This function produces a tuple
     -- The first value is to keep track of any previous blocks/epochs
-    -- The second value is the previous blocks/epochs plus the prefixes of each block/epochs
+    -- The second value is the previous blocks/epochs plus the prefixes of each block/epoch
     appendPrefixes ::
       (b -> [b]) ->
       ([b], [[b]]) ->
       b ->
       ([b], [[b]])
     appendPrefixes getPrefixsFn (accumulatedXs, prefixList) x =
-      let addPrevXsFn = (++) accumulatedXs
+      let addPrevXsFn = (<>) accumulatedXs
           newPrefixes = addPrevXsFn <$> (pure <$> (getPrefixsFn x))
-       in (accumulatedXs ++ [x], prefixList ++ newPrefixes)
+       in (accumulatedXs <> [x], prefixList <> newPrefixes)
 
     shrinkModelEpochs ::
       [ModelEpoch AllModelFeatures] ->
       [[ModelEpoch AllModelFeatures]]
-    shrinkModelEpochs epochs = snd $ foldl (appendPrefixes getEpochPrefixes) ([], []) epochs
+    shrinkModelEpochs es = snd $ foldl (appendPrefixes getEpochPrefixes) ([], []) es
 
-shrinkDiscardUnnecessaryTxns ::
-  forall a.
-  (a, [ModelEpoch AllModelFeatures]) ->
-  (a, [ModelEpoch AllModelFeatures])
-shrinkDiscardUnnecessaryTxns (genesis, epochs) = undefined
+data TxFieldChecks era = TxFieldChecks
+  { txFieldChecks_UTxOIds :: Set.Set ModelUTxOId,
+    txFieldChecks_Delegators :: Set.Set (ModelAddress (ScriptFeature era)),
+    txFieldChecks_Delegatees :: Set.Set ModelPoolId,
+    txFieldChecks_ModelTxNo :: Set.Set ModelTxNo
+  }
 
+data TrackDeps era = TrackDeps
+  { trackDeps_genesis :: [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
+    trackDeps_txFieldChecks :: TxFieldChecks era,
+    trackDeps_currentTxNo :: ModelTxNo,
+    trackDeps_prevEpochs :: [ModelEpoch era]
+  }
 
-shrinkPhases :: (a -> [a]) -> (a -> [a]) -> (Bool, a) -> [(Bool, a)]
-shrinkPhases f _ (False, x) = ((,) True) <$> (f x)
-shrinkPhases _ g (True, x) = ((,) True) <$> (g x)
+discardUnnecessaryTxns ::
+  forall era.
+  Proxy era ->
+  ([(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)], [ModelEpoch AllModelFeatures]) ->
+  ([(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)], [ModelEpoch AllModelFeatures])
+discardUnnecessaryTxns _ (genesis, []) = (genesis, [])
+discardUnnecessaryTxns _ (genesis, epochs) =
+  let lastEpochsTxns = toListOf modelTxs $ last epochs
+      liftedGenesis = fmap (\(x, y, z) -> (x, liftModelAddress' y, z)) genesis
+      (initialTxFieldChecks, initialTxn) = getInitialInfo liftedGenesis (init' epochs) lastEpochsTxns
+      totalModelTxs = toInteger $ lengthOf (traverse . modelTxs) epochs
 
-shrinkModel = shrinkPhases shrinkModelSimple (const [])--shrinkDiscardUnnecessaryTxns
+      (_, shrunkenEpochs) =
+        foldr
+          checkEpoch
+          (TrackDeps liftedGenesis initialTxFieldChecks (ModelTxNo totalModelTxs) $ init' epochs, [])
+          epochs
+      lastOfShrunkenEpochs = last shrunkenEpochs
+      lastEpoch = lastOfShrunkenEpochs {_modelEpoch_blocks = addInitialTxn (_modelEpoch_blocks lastOfShrunkenEpochs) initialTxn}
+
+      newEpochs = (init shrunkenEpochs) <> [lastEpoch]
+   in (genesis, newEpochs)
+  where
+    init' [] = []
+    init' es' = init es'
+
+    emptyTxFieldChecks :: forall era'. TxFieldChecks era'
+    emptyTxFieldChecks = TxFieldChecks Set.empty Set.empty Set.empty Set.empty
+
+    -- This function is to get the counter-example's TxFieldChecks and the offending transaction
+    getInitialInfo ::
+      forall era'.
+      KnownScriptFeature (ScriptFeature era') =>
+      [(ModelUTxOId, ModelAddress (ScriptFeature era'), Coin)] ->
+      [ModelEpoch era'] ->
+      [ModelTx era'] ->
+      (TxFieldChecks era', [ModelTx era'])
+    getInitialInfo _ _ [] = (emptyTxFieldChecks, [])
+    getInitialInfo g es ts =
+      let lastTx = last ts
+          inputs = lastTx ^. modelTx_inputs
+          delegates = toListOf (modelTx_dCert . traverse . _ModelDelegate) lastTx
+          txDelegators = Set.fromList $ _mdDelegator <$> delegates
+          txDelegatees = Set.fromList $ _mdDelegatee <$> delegates
+
+          -- here we are checking whether the delegations deps are within the same tx
+          -- already keeping the initial tx
+          (_, (TxFieldChecks _ delegatorsLeft delegateesLeft _)) =
+            checkTxDelegationDeps
+              (TxFieldChecks [] txDelegators txDelegatees [])
+              (lastTx ^. modelTx_dCert)
+
+          txWdrls = lastTx ^. modelTx_wdrl
+          updatedFieldChecks =
+            trackWdrlDeps txWdrls (TxFieldChecks inputs delegatorsLeft delegateesLeft []) $
+              TrackDeps g emptyTxFieldChecks (-1) es
+       in (updatedFieldChecks, [lastTx])
+
+    -- This function adds the orignal counter-example transaction into the shrunken Epochs
+    addInitialTxn [] _ = []
+    addInitialTxn bs t =
+      let lastBlock = last bs
+          updatedLastBlock = lastBlock {_modelBlock_txSeq = (_modelBlock_txSeq lastBlock) <> t}
+       in (init bs) <> [updatedLastBlock]
+
+    checkTxNo ::
+      forall era'.
+      ModelTxNo ->
+      TxFieldChecks era' ->
+      (Bool, TxFieldChecks era')
+    checkTxNo currentTxNo (TxFieldChecks utxos dors dees txNos) =
+      let bMatchingTxNo = elem currentTxNo txNos
+          newTxNos = Set.filter ((/=) currentTxNo) txNos
+       in (bMatchingTxNo, TxFieldChecks utxos dors dees newTxNos)
+
+    -- This function will return a bool to indicate whether to keep the tx and filter out any matching fields
+    checkTxDelegationDeps ::
+      forall era'.
+      TxFieldChecks era' ->
+      [ModelDCert era'] ->
+      (Bool, TxFieldChecks era')
+    checkTxDelegationDeps (TxFieldChecks uTxOIds prevDelegators prevDelegatees modelTxNos) dCerts =
+      let delegateeIds = (fmap _mppId . toListOf (traverse . _ModelRegisterPool)) dCerts
+          delegators = toListOf (traverse . _ModelRegisterStake) dCerts
+
+          bMatchingDelegateeIds = not . null $ Set.intersection (Set.fromList delegateeIds) prevDelegatees
+          bMatchingDelegators = not . null $ Set.intersection (Set.fromList delegators) prevDelegators
+          updatedDelegateeIds = Set.difference prevDelegatees (Set.fromList delegateeIds)
+          updatedDelegators = Set.difference prevDelegators (Set.fromList delegators)
+       in ( bMatchingDelegateeIds || bMatchingDelegators,
+            TxFieldChecks uTxOIds updatedDelegators updatedDelegateeIds modelTxNos
+          )
+
+    getTxNos :: ModelRewardProvenance -> Set.Set ModelTxNo
+    getTxNos (ModelRewardProvenance_Delegate (ModelRewardProvenanceDelegate s p d)) = Set.fromList [s, p, d]
+    getTxNos (ModelRewardProvenance_Pool (ModelRewardProvenancePool p)) = Set.singleton p
+
+    trackWdrlDeps ::
+      forall era'.
+      KnownScriptFeature (ScriptFeature era') =>
+      Map.Map (ModelAddress (ScriptFeature era')) (ModelValue 'ExpectAdaOnly era') ->
+      TxFieldChecks era' ->
+      TrackDeps era' ->
+      TxFieldChecks era'
+    trackWdrlDeps wdrls txFieldChecks@(TxFieldChecks utxos delegators delegatees txNos) (TrackDeps g _ _ prevEpochs)
+      | wdrls == Map.empty = txFieldChecks
+      | otherwise =
+        let mLedger = flip State.execState (mkModelLedger g) $
+              for_ prevEpochs $ \me -> State.modify (applyModelEpoch me)
+            wdrlAddrSet = Map.keysSet wdrls
+            mLedgerRewards = unGrpMap $ mLedger ^. modelLedger_rewards
+            addrsRewards = concat $ Map.elems <$> (Map.elems $ Map.restrictKeys mLedgerRewards wdrlAddrSet)
+
+            rewardModelUTxOIds = foldr Set.union Set.empty $ fst <$> addrsRewards
+            rewardTxNos = foldr Set.union Set.empty $ fmap getTxNos $ snd <$> addrsRewards
+         in TxFieldChecks (utxos <> rewardModelUTxOIds) delegators delegatees $ txNos <> rewardTxNos
+
+    -- This function checks whether to keep a tx. Appends it to list of txs to keep and tracks it's dependencies
+    checkTx ::
+      forall era'.
+      KnownScriptFeature (ScriptFeature era') =>
+      ModelTx era' ->
+      (TrackDeps era', [ModelTx era']) ->
+      (TrackDeps era', [ModelTx era'])
+    checkTx txToCheck ogTuple@(TrackDeps g txFieldChecks currentTxNo prevEpochs, txsToKeep) =
+      -- Check if current tx outputs any tx of Interests
+      let txOutputsUTxOIds = Set.fromList $ fst <$> txToCheck ^. modelTx_outputs
+          trackedUTxOIds = txFieldChecks_UTxOIds txFieldChecks
+          bMatchingUTxOIds = not . null $ Set.intersection txOutputsUTxOIds trackedUTxOIds
+
+          txDCerts = toList $ txToCheck ^. modelTx_dCert
+          (keepTx', updatedDelegFieldChecks) = checkTxDelegationDeps txFieldChecks txDCerts
+
+          (keepTx, updatedDelegWdrlFieldChecks') =
+            checkTxNo currentTxNo updatedDelegFieldChecks
+          newTxNo = currentTxNo - 1
+       in case (bMatchingUTxOIds || keepTx || keepTx') of
+            False -> ((fst ogTuple) {trackDeps_currentTxNo = newTxNo}, txsToKeep)
+            _ ->
+              -- tx is tx of interest
+              let updatedTrackedUTxOIds = Set.difference trackedUTxOIds txOutputsUTxOIds
+                  txInputs = txToCheck ^. modelTx_inputs
+                  -- track inputs of tx
+                  updatedUTxOIds = txInputs <> updatedTrackedUTxOIds
+
+                  (TxFieldChecks wdrlUTxOIds prevDelegators prevDelegatees txNos) =
+                    trackWdrlDeps (txToCheck ^. modelTx_wdrl) updatedDelegWdrlFieldChecks' $ fst ogTuple
+
+                  txDelegations = toListOf (traverse . _ModelDelegate) txDCerts
+                  txDelegators = Set.fromList $ _mdDelegator <$> txDelegations
+                  txDelegatees = Set.fromList $ _mdDelegatee <$> txDelegations
+                  -- We want to check whether Delegation Deps are within the same tx's _mtxDCerts
+                  (alreadyFound, (TxFieldChecks _ delegatorsLeft delegateesLeft _)) =
+                    checkTxDelegationDeps
+                      (TxFieldChecks [] txDelegators txDelegatees [])
+                      txDCerts
+                  -- Only add if not already found within same txn
+                  (updatedDelegators, updatedDelegatees) = case alreadyFound of
+                    True -> (prevDelegators <> delegatorsLeft, prevDelegatees <> delegateesLeft)
+                    False -> (prevDelegators <> txDelegators, prevDelegatees <> txDelegatees)
+
+                  newTxFieldChecks =
+                    TxFieldChecks (updatedUTxOIds <> wdrlUTxOIds) updatedDelegators updatedDelegatees txNos
+               in (TrackDeps g newTxFieldChecks newTxNo prevEpochs, txToCheck : txsToKeep)
+
+    checkBlock ::
+      forall era'.
+      KnownScriptFeature (ScriptFeature era') =>
+      ModelBlock era' ->
+      (TrackDeps era', [ModelBlock era']) ->
+      (TrackDeps era', [ModelBlock era'])
+    checkBlock (ModelBlock slotNo txs) (trackDeps, trackedBlocks) =
+      let (newTrackDeps, newTxs) = foldr checkTx (trackDeps, []) txs
+       in (newTrackDeps, (ModelBlock slotNo newTxs) : trackedBlocks)
+
+    checkEpoch ::
+      forall era'.
+      KnownScriptFeature (ScriptFeature era') =>
+      ModelEpoch era' ->
+      (TrackDeps era', [ModelEpoch era']) ->
+      (TrackDeps era', [ModelEpoch era'])
+    checkEpoch (ModelEpoch blocks blocksMade) (trackDeps, trackedEpochs) =
+      let (TrackDeps g newUTxOIds newTxNo es, newBlocks) = foldr checkBlock (trackDeps, []) blocks
+       in (TrackDeps g newUTxOIds newTxNo $ init' es, (ModelEpoch newBlocks blocksMade) : trackedEpochs)
+
+shrinkModel ::
+  Proxy era ->
+  ( Bool,
+    ( [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
+      [ModelEpoch AllModelFeatures]
+    )
+  ) ->
+  [ ( Bool,
+      ( [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
+        [ModelEpoch AllModelFeatures]
+      )
+    )
+  ]
+shrinkModel p = shrinkPhases shrinkModelSimple (\x -> [discardUnnecessaryTxns p x])
+  where
+    shrinkPhases f _ (False, x) = ((,) True) <$> (f x)
+    shrinkPhases _ g (True, x) = ((,) True) <$> (g x)
 
 -- | some hand-written model based unit tests
 modelUnitTests ::
@@ -518,10 +707,7 @@ modelUnitTests proxy =
   testGroup
     (show $ typeRep proxy)
     [ testProperty "gen" $ checkCoverage $ modelGenTest proxy,
-      testProperty "DPAKS TEST" $ forAllShrink (pure generatedEpochs) shrinkModel $ \(_ :: Bool, (a, b)) -> conjoin
-      [ testChainModelInteraction proxy a b
-      ]
-      ,
+      testProperty "gen Always shrink" $ checkCoverage $ testModelShrinking proxy,
       testProperty "noop" $ testChainModelInteraction proxy [] [],
       testProperty "noop-2" $
         testChainModelInteraction
@@ -824,16 +1010,141 @@ modelUnitTests proxy =
           ]
     ]
 
-generatedEpochs :: (Bool, ([(ModelUTxOId, ModelAddress k, Coin)], [ModelEpoch AllModelFeatures]))
-generatedEpochs = undefined
+shrinkSimpleTestData :: [ModelEpoch AllModelFeatures]
+shrinkSimpleTestData =
+  [ ModelEpoch
+      [ ModelBlock 1 [modelTx {_mtxInputs = [1]}, modelTx {_mtxInputs = [2]}, modelTx {_mtxInputs = [3]}],
+        ModelBlock 2 [modelTx {_mtxInputs = [4]}, modelTx {_mtxInputs = [5]}, modelTx {_mtxInputs = [6]}],
+        ModelBlock 3 [modelTx {_mtxInputs = [7]}, modelTx {_mtxInputs = [8]}, modelTx {_mtxInputs = [9]}]
+      ]
+      mempty,
+    ModelEpoch
+      [ ModelBlock 4 [modelTx {_mtxInputs = [10]}, modelTx {_mtxInputs = [11]}, modelTx {_mtxInputs = [12]}],
+        ModelBlock 5 [modelTx {_mtxInputs = [13]}, modelTx {_mtxInputs = [14]}, modelTx {_mtxInputs = [15]}],
+        ModelBlock 6 [modelTx {_mtxInputs = [16]}, modelTx {_mtxInputs = [17]}, modelTx {_mtxInputs = [18]}]
+      ]
+      mempty,
+    ModelEpoch
+      [ ModelBlock 7 [modelTx {_mtxInputs = [19]}, modelTx {_mtxInputs = [20]}, modelTx {_mtxInputs = [21]}],
+        ModelBlock 8 [modelTx {_mtxInputs = [22]}, modelTx {_mtxInputs = [23]}, modelTx {_mtxInputs = [24]}],
+        ModelBlock 9 [modelTx {_mtxInputs = [25]}, modelTx {_mtxInputs = [26]}, modelTx {_mtxInputs = [27]}]
+      ]
+      mempty
+  ]
 
+shrinkDiscardTestData :: [ModelEpoch AllModelFeatures]
+shrinkDiscardTestData =
+  let defaultTxOut = modelTxOut "bob" (modelCoin 0)
+      testPool = ModelPoolParams "pool1" (Coin 0) (Coin 0) (fromJust $ boundRational $ 0 % 1) "rewardAcct" ["poolOwner"]
+      testPool2 = ModelPoolParams "pool2" (Coin 0) (Coin 0) (fromJust $ boundRational $ 0 % 1) "rewardAcct2" ["poolOwner2"]
+      testPool3 = ModelPoolParams "pool3" (Coin 0) (Coin 0) (fromJust $ boundRational $ 0 % 1) "rewardAcct3" ["poolOwner3"]
+   in [ ModelEpoch
+          [ ModelBlock
+              1
+              [ modelTx {_mtxInputs = [1], _mtxOutputs = [(6, defaultTxOut)]},
+                modelTx {_mtxInputs = [2], _mtxOutputs = [(5, defaultTxOut)]},
+                modelTx {_mtxInputs = [3], _mtxOutputs = [(4, defaultTxOut)]}
+              ],
+            ModelBlock
+              2
+              [ modelTx {_mtxInputs = [4], _mtxOutputs = [(8, defaultTxOut), (9, defaultTxOut)]},
+                modelTx {_mtxInputs = [5], _mtxDCert = [ModelRegisterStake "someAddress3"]},
+                modelTx {_mtxInputs = [6], _mtxOutputs = [(7, defaultTxOut)]}
+              ],
+            ModelBlock
+              3
+              [ modelTx {_mtxInputs = [7], _mtxOutputs = [(11, defaultTxOut), (12, defaultTxOut)]},
+                modelTx {_mtxInputs = [8], _mtxDCert = [ModelRegisterPool testPool3]},
+                modelTx {_mtxInputs = [9], _mtxOutputs = [(10, defaultTxOut)]}
+              ]
+          ]
+          mempty,
+        ModelEpoch
+          [ ModelBlock
+              4
+              [ modelTx {_mtxInputs = [10], _mtxOutputs = [(14, defaultTxOut), (15, defaultTxOut)]},
+                modelTx {_mtxInputs = [11]},
+                modelTx {_mtxInputs = [12], _mtxOutputs = [(13, defaultTxOut)], _mtxDCert = [ModelDelegate (ModelDelegation "someAddress3" "pool3")]}
+              ],
+            ModelBlock
+              5
+              [ modelTx {_mtxInputs = [13], _mtxOutputs = [(17, defaultTxOut), (18, defaultTxOut)]},
+                modelTx {_mtxInputs = [14], _mtxDCert = [ModelRegisterStake "someAddress2"]},
+                modelTx {_mtxInputs = [15], _mtxOutputs = [(16, defaultTxOut)]}
+              ],
+            ModelBlock
+              6
+              [ modelTx {_mtxInputs = [16], _mtxOutputs = [(20, defaultTxOut), (21, defaultTxOut)]},
+                modelTx {_mtxInputs = [17], _mtxDCert = [ModelRegisterPool testPool2]},
+                modelTx {_mtxInputs = [18], _mtxOutputs = [(19, defaultTxOut)]}
+              ]
+          ]
+          mempty,
+        ModelEpoch
+          [ ModelBlock
+              7
+              [ modelTx {_mtxInputs = [19], _mtxOutputs = [(23, defaultTxOut), (24, defaultTxOut)]},
+                modelTx {_mtxInputs = [20], _mtxDCert = [ModelRegisterStake "someAddress"]},
+                modelTx {_mtxInputs = [21], _mtxOutputs = [(22, defaultTxOut)]}
+              ],
+            ModelBlock
+              8
+              [ modelTx {_mtxInputs = [22], _mtxOutputs = [(26, defaultTxOut), (27, defaultTxOut)]},
+                modelTx {_mtxInputs = [23], _mtxDCert = [ModelRegisterPool testPool]},
+                modelTx {_mtxInputs = [24], _mtxOutputs = [(25, defaultTxOut)]}
+              ],
+            ModelBlock
+              9
+              [ modelTx {_mtxInputs = [25]},
+                modelTx {_mtxInputs = [26], _mtxDCert = [ModelDelegate (ModelDelegation "someAddress2" "pool2")]},
+                modelTx {_mtxInputs = [27], _mtxDCert = [ModelDelegate (ModelDelegation "someAddress" "pool1")]}
+              ]
+          ]
+          mempty
+      ]
+
+testShrinkModelSimple :: [((), [ModelEpoch AllModelFeatures])]
+testShrinkModelSimple = shrinkModelSimple ((), shrinkSimpleTestData)
+
+modelShrinkingUnitTests :: TestTree
+modelShrinkingUnitTests =
+  testGroup
+    "model-shrinking-unit-tests"
+    [ testProperty "test simple shrink" $
+        let x = shrinkModelSimple ((), shrinkSimpleTestData)
+            y =
+              ( (),
+                [ ModelEpoch
+                    [ ModelBlock 1 [modelTx {_mtxInputs = [1]}, modelTx {_mtxInputs = [2]}, modelTx {_mtxInputs = [3]}],
+                      ModelBlock 2 [modelTx {_mtxInputs = [4]}, modelTx {_mtxInputs = [5]}, modelTx {_mtxInputs = [6]}],
+                      ModelBlock 3 [modelTx {_mtxInputs = [7]}, modelTx {_mtxInputs = [8]}, modelTx {_mtxInputs = [9]}]
+                    ]
+                    mempty,
+                  ModelEpoch
+                    [ ModelBlock 4 [modelTx {_mtxInputs = [10]}, modelTx {_mtxInputs = [11]}, modelTx {_mtxInputs = [12]}],
+                      ModelBlock 5 [modelTx {_mtxInputs = [13]}, modelTx {_mtxInputs = [14]}, modelTx {_mtxInputs = [15]}],
+                      ModelBlock 6 [modelTx {_mtxInputs = [16]}, modelTx {_mtxInputs = [17]}, modelTx {_mtxInputs = [18]}]
+                    ]
+                    mempty,
+                  ModelEpoch
+                    [ ModelBlock 7 [modelTx {_mtxInputs = [19]}, modelTx {_mtxInputs = [20]}, modelTx {_mtxInputs = [21]}],
+                      ModelBlock 8 [modelTx {_mtxInputs = [22]}, modelTx {_mtxInputs = [23]}, modelTx {_mtxInputs = [24]}],
+                      ModelBlock 9 [modelTx {_mtxInputs = [25]}, modelTx {_mtxInputs = [26]}]
+                    ]
+                    mempty
+                ]
+              )
+         in head x === ((), [ModelEpoch [ModelBlock 1 []] mempty])
+              .&&. List.last x === y
+    ]
 
 modelUnitTests_ :: TestTree
 modelUnitTests_ =
   testGroup
     "model-unit-tests"
     [ modelUnitTests (Proxy :: Proxy (ShelleyEra C_Crypto)),
-      modelUnitTests (Proxy :: Proxy (AlonzoEra C_Crypto))
+      modelUnitTests (Proxy :: Proxy (AlonzoEra C_Crypto)),
+      modelShrinkingUnitTests
     ]
 
 modelTxOut :: ModelAddress AllScriptFeatures -> ModelValue 'ExpectAnyOutput AllModelFeatures -> ModelTxOut AllModelFeatures
