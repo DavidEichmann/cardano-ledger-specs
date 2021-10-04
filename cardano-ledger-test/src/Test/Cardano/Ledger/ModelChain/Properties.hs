@@ -303,6 +303,9 @@ prop_simulateChainModel g e = execPropertyWriter $ do
 tellProperty :: Writer.MonadWriter (Endo Property) m => (Property -> Property) -> m ()
 tellProperty = Writer.tell . Endo
 
+tellProperty_ :: (Writer.MonadWriter (Endo Property) m, Testable prop) => prop -> m ()
+tellProperty_ = Writer.tell . Endo . (.&&.)
+
 execPropertyWriter :: Testable prop => Writer.Writer (Endo Property) () -> prop -> Property
 execPropertyWriter x k = (flip appEndo (property k)) . Writer.execWriter $ x
 
@@ -410,11 +413,23 @@ testModelShrinking ::
   Property
 testModelShrinking proxy =
   forAll (genModel' (reifyRequiredFeatures $ Proxy @(EraFeatureSet era)) testGlobals) $ \(_ :: Bool, (a, b)) ->
-    let ab'@(a', b') = discardUnnecessaryTxns (Proxy @(EraFeatureSet era)) (a, b)
+    let mTxns = discardUnnecessaryTxns (Proxy @(EraFeatureSet era)) (a, b)
+        ab'@(a', b') =
+          case mTxns of
+            Just (x, y) -> (x, y)
+            Nothing -> (a, b)
         numBefore = (lengthOf (traverse . modelTxs)) b
         numAfter = (lengthOf (traverse . modelTxs)) b'
+
+        mTxns' = discardUnnecessaryTxns (Proxy @(EraFeatureSet era)) (a', b')
+        (_, j) =
+          case mTxns' of
+            Just (x', y') -> (x', y')
+            Nothing -> (a', b')
+        numAfter' = (lengthOf (traverse . modelTxs)) j
      in ( execPropertyWriter $ do
             tellProperty $ cover 55 (numAfter < numBefore) "numAfter < numBefore"
+            tellProperty $ cover 55 (numAfter' == numAfter) "numAfter' == numAfter"
             tellProperty $ counterexample $ "shrunk result: ab'=" <> (show ab')
         )
           (testChainModelInteractionWith proxy checkElaboratorResult a' b')
@@ -493,8 +508,8 @@ discardUnnecessaryTxns ::
   forall era.
   Proxy era ->
   ([(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)], [ModelEpoch AllModelFeatures]) ->
-  ([(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)], [ModelEpoch AllModelFeatures])
-discardUnnecessaryTxns _ (genesis, []) = (genesis, [])
+  Maybe ([(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)], [ModelEpoch AllModelFeatures])
+discardUnnecessaryTxns _ (_, []) = Nothing
 discardUnnecessaryTxns _ (genesis, epochs) =
   let lastEpochsTxns = toListOf modelTxs $ last epochs
       liftedGenesis = fmap (\(x, y, z) -> (x, liftModelAddress' y, z)) genesis
@@ -510,7 +525,9 @@ discardUnnecessaryTxns _ (genesis, epochs) =
       lastEpoch = lastOfShrunkenEpochs {_modelEpoch_blocks = addInitialTxn (_modelEpoch_blocks lastOfShrunkenEpochs) initialTxn}
 
       newEpochs = (init shrunkenEpochs) <> [lastEpoch]
-   in (genesis, newEpochs)
+   in if (epochs == newEpochs)
+        then Nothing
+        else Just (genesis, newEpochs)
   where
     init' [] = []
     init' es' = init es'
@@ -687,7 +704,7 @@ shrinkModel ::
       )
     )
   ]
-shrinkModel p = shrinkPhases shrinkModelSimple (\x -> [discardUnnecessaryTxns p x])
+shrinkModel p = shrinkPhases shrinkModelSimple (\x -> maybe [] (\y -> [y]) $ discardUnnecessaryTxns p x)
   where
     shrinkPhases f _ (False, x) = ((,) True) <$> (f x)
     shrinkPhases _ g (True, x) = ((,) True) <$> (g x)
