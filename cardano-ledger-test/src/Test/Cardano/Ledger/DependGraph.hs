@@ -70,43 +70,61 @@ import Test.Cardano.Ledger.ModelChain.FeatureSet
 import Test.Cardano.Ledger.ModelChain.Script
 import Test.Cardano.Ledger.ModelChain.Value
 
-data GenActionContextF f = GenActionContext
-  { _genActionContexts_epochs :: f EpochNo,
-    _genActionContexts_genesesAcct :: f Coin,
-    _genActionContexts_numGenesesAcct :: f Int,
-    _genActionContexts_txnsPerSlot :: f Int,
-    _genActionContexts_numSlotsUsed :: f Int, -- TODO: make this a fraction of slots used.
-    _genActionContexts_numTxInputs :: f Int,
-    _genActionContexts_numDCerts :: f Int
+data ModelGeneratorParamsF f = ModelGeneratorParams
+  { _modelGeneratorParams_epochs :: f EpochNo,
+    _modelGeneratorParams_genesesAcct :: f Coin,
+    _modelGeneratorParams_numGenesesAcct :: f Int,
+    _modelGeneratorParams_txnsPerSlot :: f Int,
+    _modelGeneratorParams_numSlotsUsed :: f Int, -- TODO: make this a fraction of slots used.
+    _modelGeneratorParams_numTxInputs :: f Int,
+    _modelGeneratorParams_numDCerts :: f Int,
+    _modelGeneratorParams_numWdrls :: f Int
   }
   deriving (Generic)
 
-instance FFunctor GenActionContextF where ffmap = ffmapDefault
+instance FFunctor ModelGeneratorParamsF where ffmap = ffmapDefault
 
-instance FZip GenActionContextF where fzipWith = gfzipWith
+instance FZip ModelGeneratorParamsF where fzipWith = gfzipWith
 
-instance FRepeat GenActionContextF where frepeat = gfrepeat
+instance FRepeat ModelGeneratorParamsF where frepeat = gfrepeat
 
-instance FFoldable GenActionContextF where ffoldMap = ffoldMapDefault
+instance FFoldable ModelGeneratorParamsF where ffoldMap = ffoldMapDefault
 
-instance FTraversable GenActionContextF where ftraverse = gftraverse
+instance FTraversable ModelGeneratorParamsF where ftraverse = gftraverse
 
-type GenActionContext = GenActionContextF Gen
+type ModelGeneratorParams = ModelGeneratorParamsF Gen
 
-defaultGenActionContext :: GenActionContext
-defaultGenActionContext =
-  GenActionContext
-    { _genActionContexts_epochs = choose (20, 30),
-      _genActionContexts_genesesAcct = Coin <$> choose (100_000 * minOutput, 45e12),
-      _genActionContexts_numGenesesAcct = choose (1, 20),
-      _genActionContexts_txnsPerSlot = choose (1, 20),
-      _genActionContexts_numSlotsUsed = choose (0, 100),
-      _genActionContexts_numTxInputs = frequency [(10, pure 1), (1, choose (1, 8))],
-      _genActionContexts_numDCerts = frequency [(10, pure 0), (1, choose (1, 5))]
+defaultModelGeneratorParams :: ModelGeneratorParams
+defaultModelGeneratorParams =
+  ModelGeneratorParams
+    { _modelGeneratorParams_epochs = choose (20, 30),
+      _modelGeneratorParams_genesesAcct = Coin <$> choose (100_000 * minOutput, 45e12),
+      _modelGeneratorParams_numGenesesAcct = choose (1, 20),
+      _modelGeneratorParams_txnsPerSlot = choose (1, 20),
+      _modelGeneratorParams_numSlotsUsed = choose (0, 100),
+      _modelGeneratorParams_numTxInputs = frequency [(10, pure 1), (1, choose (1, 8))],
+      _modelGeneratorParams_numDCerts = frequency [(10, pure 0), (1, choose (1, 5))],
+      _modelGeneratorParams_numWdrls = choose (1,5)
     }
 
+data ModelGeneratorContext = ModelGeneratorContext
+  { _modelGeneratorContext_globals :: !Globals
+  , _modelGeneratorContext_modelGeneratorParams :: !ModelGeneratorParams
+  }
+
+modelGeneratorContext_globals :: Lens' ModelGeneratorContext Globals
+modelGeneratorContext_globals a2fb s = (\b -> s {_modelGeneratorContext_globals = b}) <$> a2fb (_modelGeneratorContext_globals s)
+{-# INLINE modelGeneratorContext_globals #-}
+
+modelGeneratorContext_modelGeneratorParams :: Lens' ModelGeneratorContext ModelGeneratorParams
+modelGeneratorContext_modelGeneratorParams a2fb s = (\b -> s {_modelGeneratorContext_modelGeneratorParams = b}) <$> a2fb (_modelGeneratorContext_modelGeneratorParams s)
+{-# INLINE modelGeneratorContext_modelGeneratorParams #-}
+
+instance HasGlobals ModelGeneratorContext where
+  getGlobals = _modelGeneratorContext_globals
+
 type GenModelM st era m =
-  ( MonadReader (Globals, GenActionContext) m,
+  ( MonadReader ModelGeneratorContext m,
     State.MonadState st m,
     HasModelLedger era st,
     MonadGen m,
@@ -117,8 +135,8 @@ type GenModelM st era m =
 
 genInputs :: GenModelM st era m => AllowScripts (ScriptFeature era) -> m (Map ModelUTxOId (ModelTxOut era))
 genInputs allowScripts = do
-  actualUtxos <- uses (modelLedger . modelLedger_utxos) _modelUtxoMap_utxos
-  utxos0 <- shuffle =<< uses (modelLedger . modelLedger_utxos) (mapMaybe (_2 . _2 . modelTxOut_address . modelAddress_pmt $ guardHaveCollateral allowScripts) . Map.toList . _modelUtxoMap_utxos)
+  actualUtxos <- uses (modelLedger . modelLedger_utxos) _modelUTxOMap_utxos
+  utxos0 <- shuffle =<< uses (modelLedger . modelLedger_utxos) (mapMaybe (_2 . _2 . modelTxOut_address . modelAddress_pmt $ guardHaveCollateral allowScripts) . Map.toList . _modelUTxOMap_utxos)
 
   let spendable :: (Coin, ModelTxOut era) -> Coin
       spendable = fst
@@ -137,7 +155,7 @@ genInputs allowScripts = do
         | val < Coin (minFee + minOutput) = go rest (val <> spendable (snd utxo)) (utxo : acc)
         | otherwise = acc
 
-  numTxInputs <- liftGen =<< asks (_genActionContexts_numTxInputs . snd)
+  numTxInputs <- liftGen =<< asks (_modelGeneratorParams_numTxInputs . _modelGeneratorContext_modelGeneratorParams)
   let utxos1 = (take numTxInputs utxos0)
       val1 = foldMap (spendable . snd) utxos1
   pure $ Map.fromList $ (fmap . fmap) snd $ go (drop numTxInputs utxos0) val1 utxos1
@@ -176,7 +194,7 @@ genScriptData addr = traverseSupportsPlutus id $
   ifSupportsPlutus (Proxy :: Proxy sf) () $ case addr of
     ModelKeyHashObj _ -> pure Nothing
     -- ModelScriptHashObj _ -> Just . PlutusTx.I <$> arbitrary
-    ModelScriptHashObj _ -> Just . PlutusTx.I <$> pure 2
+    ModelScriptHashObj _ -> Just . PlutusTx.I <$> pure 0
 
 type AllowScripts sf = IfSupportsPlutus () Bool sf
 
@@ -186,7 +204,7 @@ genCollateral ::
   m (AllowScripts (ScriptFeature era), IfSupportsPlutus () (Set ModelUTxOId) (ScriptFeature era))
 genCollateral = do
   res <- flip traverseSupportsPlutus (reifySupportsPlutus (Proxy :: Proxy (ScriptFeature era))) $ \() -> do
-    availableCollateralInputs <- uses modelLedger $ _modelUtxoMap_collateralUtxos . _modelLedger_utxos
+    availableCollateralInputs <- uses modelLedger $ _modelUTxOMap_collateralUtxos . _modelLedger_utxos
     numCollateralInputs <- choose (1, min 5 (Set.size availableCollateralInputs - 1))
     (collateral, rest) <- chooseElems numCollateralInputs availableCollateralInputs
     -- avoid spending the last unlocked utxo
@@ -244,8 +262,8 @@ genOutputs haveCollateral ins mint = do
 
 genDCert :: forall st era m. GenModelM st era m => AllowScripts (ScriptFeature era) -> m (ModelDCert era)
 genDCert allowScripts = do
-  stakeHolders <- uses (modelLedger . modelLedger_utxos) $ Map.keysSet . unGrpMap . _modelUtxoMap_stake
-  registeredStake <- uses (modelLedger . modelLedger_stake . snapshotQueue_mark . modelSnapshot_stake) $ Map.keysSet
+  stakeHolders <- uses (modelLedger . modelLedger_utxos) $ Map.keysSet . unGrpMap . _modelUTxOMap_stake
+  registeredStake <- uses (modelLedger . modelLedger_rewards) $ Map.keysSet
   pools <- uses (modelLedger . modelLedger_stake . snapshotQueue_mark . modelSnapshot_pools) $ Map.keys
 
   let unregisteredStake = Set.difference stakeHolders registeredStake
@@ -261,11 +279,12 @@ genDCert allowScripts = do
              not (null pools)
          ]
 
-genWdrl :: GenModelM st era m => AllowScripts (ScriptFeature era) -> m (Set (ModelCredential 'Staking (ScriptFeature era)))
+genWdrl :: GenModelM st era m => AllowScripts (ScriptFeature era) -> m (Map (ModelCredential 'Staking (ScriptFeature era)) Coin)
 genWdrl allowScripts = do
-  allRewards <- use (modelLedger . modelLedger_rewards)
-  rewards <- sublistOf $ mapMaybe (guardHaveCollateral allowScripts) $ Set.toList allRewards
-  pure $ Set.fromList rewards
+  allRewards <- uses (modelLedger . modelLedger_rewards) $ Map.filter (/= Val.zero)
+  numWdrls <- liftGen =<< asks (_modelGeneratorParams_numWdrls .  _modelGeneratorContext_modelGeneratorParams)
+  (rewards, _) <- chooseElems numWdrls $ Map.mapMaybeWithKey (\k v -> v <$ guardHaveCollateral allowScripts k) allRewards
+  pure rewards
 
 needCollateral ::
   forall era.
@@ -289,14 +308,16 @@ needCollateral ins wdrls mint dcerts = case reifySupportsPlutus (Proxy :: Proxy 
 
 wouldSpendLastCollateral :: GenModelM st era m => ModelTx era -> m Bool
 wouldSpendLastCollateral txn = do
-  ml' <- uses modelLedger (applyModelTx txn)
-  pure . Set.null . _modelUtxoMap_collateralUtxos $ _modelLedger_utxos ml'
+  g <- asks getGlobals
+  ml' <- uses modelLedger (execModelM (applyModelTx txn) g)
+  pure . Set.null . _modelUTxOMap_collateralUtxos $ _modelLedger_utxos ml'
 
 genModelTx :: forall era m st. GenModelM st era m => m (ModelTx era)
 genModelTx = do
   (haveCollateral, collateral) <- genCollateral
   ins <- genInputs haveCollateral
-  wdrl <- Map.fromSet (ModelValue . ModelValue_Var . ModelValue_Reward) <$> genWdrl haveCollateral
+  wdrl' <- fmap (ModelValue . ModelValue_Inject) <$> genWdrl haveCollateral
+  let wdrl = imap (\a _ -> ModelValue $ ModelValue_Var $ ModelValue_Reward a) wdrl' -- TODO: FIXME this is supposed to be id
 
   mint <- pure $ ifSupportsMint (Proxy :: Proxy (ValueFeature era)) () mempty
   (outs, fee) <- genOutputs haveCollateral ins mint
@@ -315,11 +336,12 @@ genModelTx = do
           }
 
   dcerts <- do
-    st0 <- modelLedger <<%= applyModelTx txn
-    numDCerts <- liftGen =<< asks (_genActionContexts_numDCerts . snd)
+    st0 <- use modelLedger
+    applyModelTx txn
+    numDCerts <- liftGen =<< asks (_modelGeneratorParams_numDCerts .  _modelGeneratorContext_modelGeneratorParams)
     dcerts <- replicateM numDCerts $ do
       dcert <- genDCert haveCollateral
-      modelLedger %= applyModelDCert dcert
+      applyModelDCert dcert
       pure dcert
 
     modelLedger .= st0
@@ -345,24 +367,27 @@ genBlocksMade :: GenModelM st era m => m ModelBlocksMade
 genBlocksMade = do
   pools <- use (modelLedger . modelLedger_stake . snapshotQueue_go . modelSnapshot_pools)
   currentEpoch <- use $ modelLedger . modelLedger_epoch
-  EpochSize numSlots <- asks $ runIdentity . flip epochInfoSize currentEpoch . epochInfo . fst
+  EpochSize numSlots <- asks $ runIdentity . flip epochInfoSize currentEpoch . epochInfo . _modelGeneratorContext_globals
   pools' <- Map.fromList . take (fromEnum numSlots) <$> shuffle (Map.toList pools)
+
   -- TODO: Model scenarios where pools make varying amounts of blocks (e.g. 0 or many)
-  pure $ ModelBlocksMade $ 1 % max 1 (toInteger $ Map.size pools') <$ pools'
+  let mblocksMadeWeights = 1 % max 1 (toInteger $ Map.size pools') <$ pools'
+      mblocksMade = repartition (fromIntegral numSlots) mblocksMadeWeights
+
+  pure $ ModelBlocksMade mblocksMade
 
 genModelEpoch :: GenModelM st era m => m (ModelEpoch era)
 genModelEpoch = do
   currentEpoch <- use $ modelLedger . modelLedger_epoch
-  EpochSize numSlots <- asks $ runIdentity . flip epochInfoSize currentEpoch . epochInfo . fst
+  EpochSize numSlots <- asks $ runIdentity . flip epochInfoSize currentEpoch . epochInfo . _modelGeneratorContext_globals
 
   -- we don't have to put a block in every slot.
-  numSlotsUsed <- liftGen =<< asks (_genActionContexts_numSlotsUsed . snd)
-
+  numSlotsUsed <- liftGen =<< asks (_modelGeneratorParams_numSlotsUsed . _modelGeneratorContext_modelGeneratorParams)
   slots <- take numSlotsUsed <$> sublistOf [0 .. numSlots -1]
 
   blocks <- for slots $ \slot' -> do
-    numTxns <- liftGen =<< asks (_genActionContexts_txnsPerSlot . snd)
-    txns <- replicateM numTxns $ do
+    numTxns <- liftGen =<< asks (_modelGeneratorParams_txnsPerSlot . _modelGeneratorContext_modelGeneratorParams)
+    txns <- for [1..numTxns] $ \_txnNo -> do
       txn <- genModelTx
       wouldSpendLastCollateral txn >>= \case
         False -> pure ()
@@ -374,7 +399,7 @@ genModelEpoch = do
                 show txn,
                 show st
               ]
-      modelLedger %= applyModelTx txn
+      applyModelTx txn
       pure txn
     pure
       ModelBlock
@@ -383,7 +408,8 @@ genModelEpoch = do
         }
 
   blocksMade <- genBlocksMade
-  modelLedger %= applyModelBlocksMade blocksMade
+
+  applyModelBlocksMade blocksMade
 
   pure
     ModelEpoch
@@ -554,9 +580,9 @@ fixupDust minOutput' (genesis0, epochs) =
 minOutput :: Integer
 minOutput = 500_000
 
-genGenesesUTxOs :: (MonadGen m, MonadSupply Integer m) => GenActionContext -> m [(ModelUTxOId, ModelAddress sf, Coin)]
+genGenesesUTxOs :: (MonadGen m, MonadSupply Integer m) => ModelGeneratorParams -> m [(ModelUTxOId, ModelAddress sf, Coin)]
 genGenesesUTxOs ctx = do
-  genesisSupply <- liftGen (_genActionContexts_genesesAcct ctx)
+  genesisSupply <- liftGen (_modelGeneratorParams_genesesAcct ctx)
   g' <- liftGen $ unfoldModelValue @Void (Coin minOutput) (Val.inject genesisSupply)
   xs <- for g' $ \(ModelValueSimple (x, _)) ->
     (,,)
@@ -570,21 +596,21 @@ genModel ::
   forall era.
   KnownRequiredFeatures era =>
   Globals ->
-  GenActionContext ->
+  ModelGeneratorParams ->
   Gen
     ( [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)],
       [ModelEpoch era]
     )
 genModel globals ctx = do
   let st0 :: Faucet (ModelLedger era)
-      st0 = Faucet 0 $ mkModelLedger []
+      st0 = Faucet 0 $ mkModelLedger globals modelPParams []
 
-  model <- flip runReaderT (globals, ctx) $
+  model <- flip runReaderT (ModelGeneratorContext globals ctx) $
     flip State.evalStateT st0 $ do
       genesisUtxos <- genGenesesUTxOs ctx
-      modelLedger .= mkModelLedger genesisUtxos
+      modelLedger .= mkModelLedger globals modelPParams genesisUtxos
 
-      numEpochs <- liftGen $ _genActionContexts_epochs ctx
+      numEpochs <- liftGen $ _modelGeneratorParams_epochs ctx
       epochs <- replicateM (fromEnum numEpochs) $ do
         epoch <- genModelEpoch
         pure epoch
@@ -592,9 +618,6 @@ genModel globals ctx = do
       pure (genesisUtxos, epochs)
 
   pure model
-
--- TODO: is fixupDust actually ever useful/neccessary/fast?
--- pure $ fixupDust (Coin minOutput) model
 
 freshUtxoId :: (Integral n, MonadSupply n m) => m ModelUTxOId
 freshUtxoId = ModelUTxOId . toInteger <$> supply
@@ -610,7 +633,7 @@ freshPaymentScript ::
   m (ModelCredential 'Payment ('TyScriptFeature x 'True))
 freshPaymentScript = do
   x <- supply
-  pure $ ModelScriptHashObj $ ModelPlutusScript_Parity x [True, True, False]
+  pure $ ModelScriptHashObj $ ModelPlutusScript_Salt x $ ModelPlutusScript_Preprocessed SumsTo103
 
 genPaymentCredential ::
   forall sf m.
@@ -632,7 +655,7 @@ freshStakeScript ::
   m (ModelCredential 'Staking ('TyScriptFeature x 'True))
 freshStakeScript = do
   x <- supply
-  pure $ ModelScriptHashObj $ ModelPlutusScript_Parity x [True, False]
+  pure $ ModelScriptHashObj $ ModelPlutusScript_Salt x $ ModelPlutusScript_Preprocessed RedeemerIs102
 
 genStakingCredential ::
   forall sf m.

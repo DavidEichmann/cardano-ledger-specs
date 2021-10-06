@@ -25,7 +25,8 @@
 module Test.Cardano.Ledger.Elaborators where
 
 -- TODO use CPS'ed writer
-
+import Shelley.Spec.Ledger.API.Wallet (getRewardInfo)
+import Debug.Trace
 import qualified Cardano.Crypto.DSIGN.Class as DSIGN
 import qualified Cardano.Crypto.Hash.Class as Hash
 import qualified Cardano.Crypto.VRF.Class (VerKeyVRF)
@@ -35,6 +36,9 @@ import Cardano.Ledger.Alonzo.Scripts (ExUnits (..))
 import qualified Cardano.Ledger.Alonzo.Scripts as Alonzo
 import Cardano.Ledger.Alonzo.Tx (IsValid (..), ScriptPurpose (..))
 import qualified Cardano.Ledger.Alonzo.Tx as Alonzo
+import qualified GHC.Natural
+import Quiet (Quiet (..))
+import qualified Cardano.Ledger.Alonzo.PParams as Alonzo
 import qualified Cardano.Ledger.Alonzo.TxWitness as Alonzo
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin
@@ -118,6 +122,7 @@ data ExpectedValueTypeC era where
 
 newtype ElaboratedScriptsCache era = ElaboratedScriptsCache
   {unElaboratedScriptsCache :: Map.Map (ScriptHash (Crypto era)) (Core.Script era)}
+  deriving Generic
 
 instance Semigroup (ElaboratedScriptsCache era) where
   ElaboratedScriptsCache a <> ElaboratedScriptsCache b = ElaboratedScriptsCache $ Map.unionWith const a b
@@ -182,7 +187,8 @@ data EraElaboratorState era = EraElaboratorState
     _eesUTxOs :: Map.Map ModelUTxOId (TestUTxOInfo era),
     _eesCurrentSlot :: SlotNo,
     _eesStakeCredentials :: Map.Map (Credential 'Witness (Crypto era)) (ModelCredential 'Witness (EraScriptFeature era)),
-    _eesStats :: EraElaboratorStats era
+    _eesStats :: EraElaboratorStats era,
+    _eesModel :: !(ModelLedger (EraFeatureSet era))
   }
 
 deriving instance
@@ -202,7 +208,8 @@ data TestUTxOInfo era = TestUTxOInfo
     _tuoi_maddr :: ModelAddress (EraScriptFeature era),
     _tuoi_data :: StrictMaybe (Alonzo.DataHash (Crypto era), (Alonzo.Data era))
   }
-  deriving (Show)
+  deriving stock Generic
+  deriving Show via (Quiet (TestUTxOInfo era))
 
 tuoi_txid :: Lens' (TestUTxOInfo era) (Maybe (Shelley.TxIn (Crypto era)))
 tuoi_txid a2fb s = (\b -> s {_tuoi_txid = b}) <$> a2fb (_tuoi_txid s)
@@ -237,7 +244,8 @@ data TestRedeemer era = TestRedeemer
     _trdmData :: !PlutusTx.Data,
     _trdmExUnits :: !ExUnits
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Generic)
+  deriving Show via Quiet (TestRedeemer era)
 
 elaborateModelRedeemer ::
   forall era.
@@ -273,10 +281,14 @@ eesCurrentSlot a2fb s = (\b -> s {_eesCurrentSlot = b}) <$> a2fb (_eesCurrentSlo
 eesStats :: Lens' (EraElaboratorState era) (EraElaboratorStats era)
 eesStats a2fb s = (\b -> s {_eesStats = b}) <$> a2fb (_eesStats s)
 
+eesModel :: Lens' (EraElaboratorState era) (ModelLedger (EraFeatureSet era))
+eesModel a2fb s = (\b -> s {_eesModel = b}) <$> a2fb (_eesModel s)
+
 data TestAddrInfo era = TestAddrInfo
   { _taiPmt :: TestCredentialInfo 'Payment era,
     _taiStk :: TestCredentialInfo 'Staking era
   }
+  deriving Generic
 
 getTaiAddr :: TestAddrInfo era -> Addr (Crypto era)
 getTaiAddr (TestAddrInfo (TestCredentialInfo pmt _) (TestCredentialInfo stk _)) =
@@ -286,18 +298,18 @@ deriving instance Eq (Core.Script era) => Eq (TestAddrInfo era)
 
 deriving instance Ord (Core.Script era) => Ord (TestAddrInfo era)
 
-deriving instance (C.Crypto (Crypto era), Show (Core.Script era)) => Show (TestAddrInfo era)
+deriving via (Quiet (TestAddrInfo era)) instance (C.Crypto (Crypto era), Show (Core.Script era)) => Show (TestAddrInfo era)
 
 data TestCredentialInfo k era = TestCredentialInfo
   { _tciCred :: Credential k (Crypto era),
     _tciKey :: TestKey k era
-  }
+  } deriving Generic
 
 deriving instance Eq (Core.Script era) => Eq (TestCredentialInfo k era)
 
 deriving instance Ord (Core.Script era) => Ord (TestCredentialInfo k era)
 
-deriving instance (C.Crypto (Crypto era), Show (Core.Script era)) => Show (TestCredentialInfo k era)
+deriving via (Quiet (TestCredentialInfo k era)) instance (C.Crypto (Crypto era), Show (Core.Script era)) => Show (TestCredentialInfo k era)
 
 instance HasKeyRole TestCredentialInfo
 
@@ -317,12 +329,13 @@ data TestKeyKeyed (k :: KeyRole) c = TestKeyKeyed
   { _tkkKeyPair :: KeyPair k c,
     _tkkKeyHash :: KeyHash k c
   }
+  deriving Generic
 
 instance Eq (TestKeyKeyed k c) where (==) = (==) `on` _tkkKeyHash
 
 instance Ord (TestKeyKeyed k c) where compare = compare `on` _tkkKeyHash
 
-deriving instance C.Crypto c => Show (TestKeyKeyed k c)
+deriving via (Quiet (TestKeyKeyed k c)) instance C.Crypto c => Show (TestKeyKeyed k c)
 
 data TestKeyScript era = TestKeyScript (Core.Script era) (ScriptHash (Crypto era))
 
@@ -531,16 +544,22 @@ getScriptWitnessFor proxy maddr0 = case filterModelCredential (eraFeatureSet (Pr
         f (TestKey_Script _) = error $ "unexpected script addr in timelock" <> show maddr0
      in coerceKeyRole @_ @_ @(Crypto era) . f . _tciKey <$> getCredentialForImpl proxy maddr
 
-instance Default (EraElaboratorState era) where
-  def =
-    EraElaboratorState
+-- instance Default (EraElaboratorState era) where
+--   def =
+
+mkEraElaboratorState :: ElaborateEraModel era => Globals -> Alonzo.PParams () -> EraElaboratorState era
+mkEraElaboratorState globals pp =
+  let
+    mdl = mkModelLedger globals pp []
+  in EraElaboratorState
       { _eesUnusedKeyPairs = 1,
         _eesKeys = Map.empty,
         _eesCurrentEpoch = 0,
         _eesCurrentSlot = 0,
         _eesStakeCredentials = Map.empty,
         _eesUTxOs = Map.empty,
-        _eesStats = mempty
+        _eesStats = mempty,
+        _eesModel = mdl
       }
 
 tellMintWitness ::
@@ -690,8 +709,27 @@ mempoolState = \a2b s ->
    in mkNES <$> a2b (mkMempoolState s)
 {-# INLINE mempoolState #-}
 
+
+
+data ElaborateApplyTxError era = ElaborateApplyTxError
+  { _eateTx  :: !(Core.Tx era)
+  , _eateMtx :: !(ModelTx (EraFeatureSet era))
+  , _eateNes :: !(NewEpochState era)
+  , _eateEes :: !(EraElaboratorState era)
+  , _eateErr :: !(ApplyTxError era)
+  }
+
+deriving instance
+    ( Show (Core.Tx era)
+    , LedgerState.TransUTxOState Show era
+    , Show (Core.Script era)
+    , Show (ApplyTxError era)
+    )
+    => Show (ElaborateApplyTxError era)
+
+
 data ElaborateBlockError era
-  = ElaborateBlockError_ApplyTx (Core.Tx era) (ApplyTxError era)
+  = ElaborateBlockError_ApplyTx (ElaborateApplyTxError era) -- (Core.Tx era) (ApplyTxError era)
   | ElaborateBlockError_Fee (ModelValueError Coin)
   | ElaborateBlockError_TxValue (ModelValueError (Core.Value era))
   deriving (Generic)
@@ -703,6 +741,8 @@ deriving instance
   ( Show (ApplyTxError era),
     Show (Core.Value era),
     Show (Core.Tx era)
+    , LedgerState.TransUTxOState Show era
+    , Show (Core.Script era)
   ) =>
   Show (ElaborateBlockError era)
 
@@ -870,6 +910,10 @@ class
     ( ApplyBlock era,
       ApplyTx era,
       UsesValue era
+    , Show (Core.Script era)
+    , Show (Core.Tx era)
+    , Era era
+    , LedgerState.TransUTxOState Show era
     ) =>
     Globals ->
     ModelBlock (EraFeatureSet era) ->
@@ -896,9 +940,10 @@ class
         mempoolEnv <- (\(nes0, _) -> mkMempoolEnv nes0 slot) <$> get
 
         -- apply the transactions.
-        for_ txSeq $ \(tx) -> do
-          (nes0, ems) <- get
-          (mps', _) <- liftApplyTxError tx $ applyTx globals mempoolEnv (view mempoolState nes0) tx
+        for_ (zip txSeq mtxSeq) $ \(tx, mtx) -> do
+          (nes0, ems0) <- get
+          let ems = over eesModel (execModelM (applyModelTx mtx) globals) ems0
+          (mps', _) <- liftApplyTxError (ElaborateApplyTxError tx mtx nes0 ems0) $ applyTx globals mempoolEnv (view mempoolState nes0) tx
 
           let nes1 = set mempoolState mps' nes0
               adaSupply = totalAdaES (LedgerState.nesEs nes1)
@@ -908,6 +953,7 @@ class
                 { _eeStats_adaConservedErrors = [(globals, mempoolEnv, (view mempoolState nes0), tx)]
                 }
           put (nes1, ems)
+          compareModelLedger mtx
 
         pure ()
 
@@ -923,6 +969,10 @@ class
     )
   default elaborateInitialState ::
     ( CanStartFromGenesis era
+    , Show (Core.Script era)
+    , Show (Core.Tx era)
+    , Era era
+    , LedgerState.TransUTxOState Show era
     ) =>
     ShelleyGenesis era ->
     AdditionalGenesisConfig era ->
@@ -931,7 +981,8 @@ class
     ( NewEpochState era,
       EraElaboratorState era
     )
-  elaborateInitialState sg additionalGenesesConfig genesisAccounts = State.runState $ do
+  elaborateInitialState sg additionalGenesesConfig genesisAccounts = (State.execState (compareModelLedger genesisAccounts) .) $ State.runState $ do
+    eesModel %= applyModelGenesisUTxOs genesisAccounts
     utxo0 <- fmap (Map.fromListWith (\_ _ -> error "addr collision")) $
       for genesisAccounts $ \(oid, mAddr, coins) -> do
         addr <- getAddrFor (Proxy :: Proxy era) mAddr
@@ -1132,26 +1183,43 @@ class
       (NewEpochState era, EraElaboratorState era)
     )
   default elaborateBlocksMade ::
-    ApplyBlock era =>
+    ( ApplyBlock era
+    , Show (Core.Script era)
+    , Show (Core.Tx era)
+    , Era era
+    , LedgerState.TransUTxOState Show era
+    , HasField "_a0" (Core.PParams era) NonNegativeInterval
+    , HasField "_d" (Core.PParams era) UnitInterval
+    , HasField "_nOpt" (Core.PParams era) GHC.Natural.Natural
+    , HasField "_protocolVersion" (Core.PParams era) Alonzo.ProtVer
+    , HasField "_rho" (Core.PParams era) UnitInterval
+    , HasField "_tau" (Core.PParams era) UnitInterval
+    ) =>
     Globals ->
     ModelBlocksMade ->
     (NewEpochState era, EraElaboratorState era) ->
     ( BlocksMade (Crypto era),
       (NewEpochState era, EraElaboratorState era)
     )
-  elaborateBlocksMade globals (ModelBlocksMade mblocksMadeWeights) = State.runState $ do
+  elaborateBlocksMade globals mblocksMade = State.runState $ do
+    _2 . eesModel %= execModelM (applyModelBlocksMade mblocksMade) globals
+
     prevEpoch <- use $ _2 . eesCurrentEpoch
     epoch <- _2 . eesCurrentEpoch <%= succ
     let ei = epochInfo globals
         slotsInEpoch = runIdentity $ epochInfoSize ei prevEpoch
 
-    let mblocksMade = repartition (fromIntegral slotsInEpoch) mblocksMadeWeights
-    bs <- for (Map.toList mblocksMade) $ \(maddr, n) -> do
+    -- let mblocksMade = repartition (fromIntegral slotsInEpoch) mblocksMadeWeights
+    bs <- for (Map.toList $ unModelBlocksMade mblocksMade) $ \(maddr, n) -> do
       poolKey <- zoom _2 $ getTestPoolId (Proxy :: Proxy era) maddr
       pure (poolKey, n)
 
     let bs' = BlocksMade $ Map.fromList bs
     _1 %= emulateBlocksMade bs'
+
+    nes <- use _1
+    -- traceM $ "globals:" <> show globals
+    -- traceM $ "getRewardInfo: " <> show (getRewardInfo globals nes)
 
     let firstOfNew = runIdentity $ epochInfoFirst ei epoch
 
@@ -1164,6 +1232,8 @@ class
     unless (currentSlot > neededSlot) $
       zoom _1 $ State.state $ \nes0 -> ((), applyTick globals nes0 (neededSlot + 1))
     zoom _1 $ State.state $ \nes0 -> ((), applyTick globals nes0 firstOfNew)
+
+    compareModelLedger mblocksMade
 
     pure bs'
 
@@ -1214,10 +1284,10 @@ class
 
 liftApplyTxError ::
   Except.MonadError (ElaborateBlockError era) m =>
-  Core.Tx era ->
+  (ApplyTxError era -> ElaborateApplyTxError era) -> -- Core.Tx era ->
   Except.Except (ApplyTxError era) a ->
   m a
-liftApplyTxError tx = either (Except.throwError . ElaborateBlockError_ApplyTx tx) pure . Except.runExcept
+liftApplyTxError tx = either (Except.throwError . ElaborateBlockError_ApplyTx . tx) pure . Except.runExcept
 
 -- | simulate blocks made in the current epoch.  this functions like ApplyBlock or
 -- ApplyTx, but without presenting real blocks to the ledger.  This is only
@@ -1268,6 +1338,56 @@ observeRewards mtxid (nes, ems) =
           Just a' -> pure $ coerceKeyRole' a'
           Nothing -> error $ unwords ["observeRewards:", show mtxid, "can't find", show a]
         pure (a', b)
+
+compareModelLedger ::
+  forall era a m.
+  ( Show a
+  , MonadState (NewEpochState era, EraElaboratorState era) m
+  , Show (Core.Script era)
+  , Show (Core.Tx era)
+  , Era era
+  , LedgerState.TransUTxOState Show era
+  -- , Show (NewEpochState era), Show (EraElaboratorState era
+  )
+  => a
+  -> m ()
+compareModelLedger hint = do
+  -- (nes, ees) <- State.get
+  -- let issues = compareModelLedgerImpl (_eesModel ees) nes
+  -- unless (null issues) $
+  --   traceM $ unlines
+  --     [ "model/elaborated diverged"
+  --     , show hint
+  --     , show issues
+  --     , show nes
+  --     , show ees
+  --     ]
+  pure ()
+
+compareModelLedgerImpl :: ModelLedger (EraFeatureSet era) -> NewEpochState era -> [ElaboratorLedgerIssue era]
+compareModelLedgerImpl ml@(ModelLedger mutxos msnapshots mepochNo mrewards mrupd mprevpp macct) nes = Writer.execWriter $ do
+  unless
+    ( length (_modelUTxOMap_utxos mutxos)
+      == length (UTxO.unUTxO $ LedgerState._utxo $ LedgerState._utxoState $  LedgerState.esLState $ LedgerState.nesEs nes)
+    ) $ Writer.tell [MissingUtxos]
+  unless (mepochNo == LedgerState.nesEL nes)
+    $ Writer.tell [WrongEpoch]
+  unless (_modelAccounts_treasury macct == LedgerState._treasury (LedgerState.esAccountState $ LedgerState.nesEs nes))
+    $ Writer.tell [MismatchedTreasury]
+  unless (_modelAccounts_reserves macct == LedgerState._reserves (LedgerState.esAccountState $ LedgerState.nesEs nes))
+    $ Writer.tell [MismatchedReserves]
+  -- unless (_modelAccounts_fees macct == LedgerState._fees (LedgerState._utxoState $ LedgerState.esLState $ LedgerState.nesEs nes))
+  --   $ Writer.tell [MismatchedFees]
+
+data ElaboratorLedgerIssue era
+  = MissingUtxos
+  | WrongEpoch
+  | MismatchedTreasury
+  | MismatchedReserves
+  | MismatchedFees
+  deriving Show
+
+
 
 data ApplyBlockTransitionError era
   = ApplyBlockTransitionError_Tx (ApplyTxError era)

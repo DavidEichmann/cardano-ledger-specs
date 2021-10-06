@@ -10,6 +10,7 @@
 
 module Test.Cardano.Ledger.ModelChain.Utils where
 
+import qualified Cardano.Ledger.Alonzo.PParams as Alonzo
 import Cardano.Ledger.BaseTypes (Globals (..), activeSlotVal, boundRational, epochInfo)
 import Cardano.Ledger.Coin
 import qualified Cardano.Ledger.Core as Core
@@ -25,6 +26,7 @@ import Shelley.Spec.Ledger.API.Genesis
 import Shelley.Spec.Ledger.API.Mempool (ApplyTxError (..))
 import Shelley.Spec.Ledger.Genesis
 import Shelley.Spec.Ledger.LedgerState (NewEpochState)
+import qualified Shelley.Spec.Ledger.LedgerState as LedgerState
 import Shelley.Spec.Ledger.PParams (emptyPParams)
 import qualified Shelley.Spec.Ledger.PParams as PParams
 import Test.Cardano.Ledger.Elaborators
@@ -52,6 +54,27 @@ chainModelInteractionWith _ genesisAccounts modelBlocks =
 
       globals = testGlobals
 
+      pp :: PParams.PParams era
+      pp = PParams.PParams
+        { PParams._minfeeA = Alonzo._minfeeA modelPParams
+        , PParams._minfeeB = Alonzo._minfeeB modelPParams
+        , PParams._maxBBSize = Alonzo._maxBBSize modelPParams
+        , PParams._maxTxSize = Alonzo._maxTxSize modelPParams
+        , PParams._maxBHSize = Alonzo._maxBHSize modelPParams
+        , PParams._keyDeposit = Alonzo._keyDeposit modelPParams
+        , PParams._poolDeposit = Alonzo._poolDeposit modelPParams
+        , PParams._eMax = Alonzo._eMax modelPParams
+        , PParams._nOpt = Alonzo._nOpt modelPParams
+        , PParams._a0 = Alonzo._a0 modelPParams
+        , PParams._rho = Alonzo._rho modelPParams
+        , PParams._tau = Alonzo._tau modelPParams
+        , PParams._d = Alonzo._d modelPParams
+        , PParams._extraEntropy = Alonzo._extraEntropy modelPParams
+        , PParams._protocolVersion = Alonzo._protocolVersion modelPParams
+        , PParams._minUTxOValue = PParams._minUTxOValue emptyPParams -- This isn't great probably.
+        , PParams._minPoolCost = Alonzo._minPoolCost modelPParams
+        }
+
       sg :: ShelleyGenesis era
       sg =
         ShelleyGenesis
@@ -66,20 +89,13 @@ chainModelInteractionWith _ genesisAccounts modelBlocks =
             sgSlotLength = (secondsToNominalDiffTime 1),
             sgUpdateQuorum = quorum globals,
             sgMaxLovelaceSupply = maxLovelaceSupply globals,
-            sgProtocolParams =
-              emptyPParams
-                { PParams._protocolVersion = PParams.ProtVer 5 0,
-                  PParams._maxTxSize = 1_000_000,
-                  PParams._rho = case boundRational 0.02 of
-                    Just rho -> rho
-                    Nothing -> error "boundRational 0.02 out of bounds"
-                }, -- genPParams
+            sgProtocolParams = pp,
             sgGenDelegs = mempty, --  genGenesisDelegationList
             sgInitialFunds = mempty, -- genFundsList
             sgStaking = emptyGenesisStaking -- genStaking
           }
 
-      elabState = elaborateInitialState sg def genesisAccounts def
+      elabState = elaborateInitialState sg def genesisAccounts (mkEraElaboratorState globals modelPParams)
    in elaborateBlocks_ globals modelBlocks elabState
 
 -- | Apply a list of ModelEpoch's to an empty ledger, then check the resulting
@@ -92,6 +108,7 @@ testChainModelInteractionWith ::
     Show (Core.Value era),
     Show (Core.Tx era),
     Show (Core.Script era)
+    , LedgerState.TransUTxOState Show era
   ) =>
   proxy era ->
   (NewEpochState era -> EraElaboratorState era -> prop) ->
@@ -122,6 +139,8 @@ testChainModelInteractionRejection ::
     Show (PredicateFailure (Core.EraRule "LEDGER" era)),
     Show (Core.Value era),
     Show (Core.Tx era)
+    , LedgerState.TransUTxOState Show era
+    , Show (Core.Script era)
   ) =>
   proxy era ->
   ModelPredicateFailure (EraFeatureSet era) ->
@@ -138,7 +157,7 @@ testChainModelInteractionRejection proxy e a = filterChainModelProp proxy $ \b -
                 Right elaboratedError -> case (e', elaboratedError) of
                   (bad@(ElaborateBlockError_Fee {}), _) -> counterexample (show bad) False
                   (bad@(ElaborateBlockError_TxValue {}), _) -> counterexample (show bad) False
-                  (ElaborateBlockError_ApplyTx _ (ApplyTxError te), ApplyBlockTransitionError_Tx (ApplyTxError te')) ->
+                  (ElaborateBlockError_ApplyTx (ElaborateApplyTxError {_eateErr = ApplyTxError te}), ApplyBlockTransitionError_Tx (ApplyTxError te')) ->
                     compareLists te te'
         -- fallthrough if/when more error types are added
         -- (te, te') -> te === te'
@@ -154,6 +173,7 @@ testChainModelInteraction ::
     Show (Core.Value era),
     Show (Core.Tx era),
     Show (Core.Script era)
+    , LedgerState.TransUTxOState Show era
   ) =>
   proxy era ->
   [(ModelUTxOId, ModelAddress (EraScriptFeature era), Coin)] ->

@@ -28,6 +28,7 @@ import Test.Cardano.Ledger.Elaborators
 import Test.Cardano.Ledger.ModelChain
 import Test.Cardano.Ledger.ModelChain.FeatureSet
 import Test.Cardano.Ledger.ModelChain.Value
+import qualified Shelley.Spec.Ledger.PParams
 
 instance
   ( PraosCrypto crypto,

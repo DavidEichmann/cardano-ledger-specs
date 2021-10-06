@@ -54,7 +54,7 @@ import qualified PlutusTx
 import Shelley.Spec.Ledger.API.Genesis
 import qualified Shelley.Spec.Ledger.LedgerState as LedgerState
 import System.CPUTime
-import Test.Cardano.Ledger.DependGraph (GenActionContextF (..), defaultGenActionContext, genModel)
+import Test.Cardano.Ledger.DependGraph (ModelGeneratorParamsF (..), defaultModelGeneratorParams, genModel)
 import Test.Cardano.Ledger.Elaborators
 import Test.Cardano.Ledger.Elaborators.Alonzo ()
 import Test.Cardano.Ledger.Elaborators.Shelley ()
@@ -133,6 +133,7 @@ modelTestDelegations ::
     Show (Core.Value era),
     Show (Core.Tx era),
     Show (Core.Script era)
+    , LedgerState.TransUTxOState Show era
   ) =>
   proxy era ->
   Bool ->
@@ -240,7 +241,7 @@ modelTestDelegations proxy needsCollateral stakeAddr@(ModelAddress _ stakeCred) 
           genAct
           [ ModelEpoch reg (ModelBlocksMade $ Map.fromList []),
             ModelEpoch [] (ModelBlocksMade $ Map.fromList []),
-            ModelEpoch [] (ModelBlocksMade $ Map.fromList [("pool1", 1 % 1)]),
+            ModelEpoch [] (ModelBlocksMade $ Map.fromList [("pool1", 100)]), -- TODO: get this from context somehow
             ModelEpoch [] (ModelBlocksMade $ Map.fromList []),
             ModelEpoch
               [ ModelBlock
@@ -279,15 +280,15 @@ genModel' ::
 genModel' _ globals = do
   (a, b) <-
     genModel @era globals $
-      defaultGenActionContext
-        { -- TODO: solve "zero withdrawal" issue, which is that some model
-          -- generated withdrawals correspond to zero rewards (esp in alonzo).
-          -- These numbers are chosen so that the "zero withdrawal" issue occurs
-          -- rarely.
-          _genActionContexts_epochs = choose (10, 18),
-          _genActionContexts_txnsPerSlot = frequency [(1, pure 1), (10, choose (2, 15))],
-          _genActionContexts_numSlotsUsed = choose (2, 15)
-        }
+      defaultModelGeneratorParams
+        -- { -- TODO: solve "zero withdrawal" issue, which is that some model
+        --   -- generated withdrawals correspond to zero rewards (esp in alonzo).
+        --   -- These numbers are chosen so that the "zero withdrawal" issue occurs
+        --   -- rarely.
+        --   _modelGeneratorParams_epochs = pure 7, -- choose (10, 18),
+        --   _modelGeneratorParams_txnsPerSlot = pure 1, -- frequency [(1, pure 1), (10, choose (2, 15))],
+        --   _modelGeneratorParams_numSlotsUsed = choose (1,3) -- choose (2, 15)
+        -- }
   pure (a, maybe (error "fromJust") id $ traverse (filterFeatures $ FeatureTag ValueFeatureTag_AnyOutput $ ScriptFeatureTag_PlutusV1) b)
 
 shrinkModelSimple ::
@@ -298,30 +299,32 @@ shrinkModelSimple (genesis, epochs) = (,) genesis <$> tail (List.init $ ([] :) $
 
 simulateChainModel ::
   (KnownScriptFeature (ScriptFeature era)) =>
+  Globals ->
   [(ModelUTxOId, ModelAddress (ScriptFeature era), Coin)] ->
   [ModelEpoch era] ->
   ModelLedger era
-simulateChainModel g e =
-  flip State.execState (mkModelLedger g) $
+simulateChainModel globals g e =
+  flip State.execState (mkModelLedger globals modelPParams g) $
     for_ e $ \mepoch -> do
-      State.modify (applyModelEpoch mepoch)
+      State.modify $ execModelM (applyModelEpoch mepoch) globals
 
 prop_simulateChainModel ::
   Testable prop =>
+  Globals ->
   [(ModelUTxOId, ModelAddress sf, Coin)] ->
   [ModelEpoch AllModelFeatures] ->
   prop ->
   Property
-prop_simulateChainModel g e = execPropertyWriter $ do
+prop_simulateChainModel globals g e = execPropertyWriter $ do
   Writer.tell $ Endo $ counterexample ("genesis:\t" <> show g)
   ((), st') :: ((), ModelLedger AllModelFeatures) <- flip
     State.runStateT
-    (mkModelLedger $ over (traverse . _2) liftModelAddress' g)
+    (mkModelLedger globals modelPParams $ over (traverse . _2) liftModelAddress' g)
     $ for_ e $ \mepoch -> do
       st <- State.get
       tellProperty $ counterexample ("ledger:\t" <> show st)
       tellProperty $ counterexample ("epoch:\t" <> show mepoch)
-      State.modify (applyModelEpoch mepoch)
+      State.modify $ execModelM (applyModelEpoch mepoch) globals
   tellProperty $ counterexample ("final ledger state:" <> show st')
 
 tellProperty :: Writer.MonadWriter (Endo Property) m => (Property -> Property) -> m ()
@@ -362,7 +365,7 @@ data ModelStats f = ModelStats
   { _numberOfEpochs :: f Int,
     _numberOfTransactions :: f Int,
     _numberOfCerts :: f Int,
-    _blocksMade :: f Rational,
+    _blocksMade :: f Natural,
     _numberOfDelegations :: f Int,
     _withdrawals :: f Int,
     _scriptUTxOs :: f Int,
@@ -371,7 +374,7 @@ data ModelStats f = ModelStats
   deriving (Generic)
 
 deriving instance
-  ( Show (f Rational),
+  ( Show (f Natural),
     Show (f Int)
   ) =>
   Show (ModelStats f)
@@ -398,7 +401,7 @@ mstats =
       _scriptUTxOs =
         lengthOf (traverse . _2 . modelTxOut_address . modelAddress_pmt . traverseModelScriptHashObj)
           . uncurry Map.restrictKeys
-          . ((_modelUtxoMap_utxos . collectModelUTxOs) &&& collectModelInputs),
+          . ((_modelUTxOMap_utxos . collectModelUTxOs) &&& collectModelInputs),
       _scriptWdrls =
         lengthOf (traverse . traverseModelScriptHashObj) . (=<<) Map.keys . toListOf (traverse . modelTxs . modelTx_wdrl)
     }
@@ -413,14 +416,14 @@ mstatsCover =
     { _numberOfEpochs = Const (shelleyFeatureTag, 90, "number of epochs") :*: Predicate (> 5),
       _numberOfTransactions = Const (shelleyFeatureTag, 90, "number of transactions") :*: Predicate (> 5),
       _numberOfCerts = Const (shelleyFeatureTag, 50, "number of certs") :*: Predicate (> 5),
-      _blocksMade = Const (shelleyFeatureTag, 50, "blocks made") :*: Predicate (> 2.5),
+      _blocksMade = Const (shelleyFeatureTag, 50, "blocks made") :*: Predicate (> 250),
       _numberOfDelegations = Const (shelleyFeatureTag, 10, "number of delegation") :*: Predicate (> 5),
       _withdrawals = Const (shelleyFeatureTag, 10, "withdrawals") :*: Predicate (> 5),
       _scriptUTxOs = Const (alonzoFeatureTag, 60, "script locked utxos") :*: Predicate (> 5),
       _scriptWdrls = Const (alonzoFeatureTag, 40, "script locked withdrarwals") :*: Predicate (> 5)
     }
 
-collectModelUTxOs :: [ModelEpoch era] -> ModelUtxoMap era
+collectModelUTxOs :: [ModelEpoch era] -> ModelUTxOMap era
 collectModelUTxOs epochs =
   fold $
     [ set (at ui) (Just txo) mempty
@@ -490,7 +493,7 @@ generateOneExample = do
       proxy' = eraFeatureSet proxy
   (a, b) <- time "generate" $ generate $ genModel' proxy' testGlobals
   time "examine" $ print $ examineModel b
-  _mresult <- time "modelApp" $ pure $ simulateChainModel a b
+  _mresult <- time "modelApp" $ pure $ simulateChainModel testGlobals a b
   result <- time "elaborate" $ pure $ fst &&& (_eesStats . snd . snd) $ chainModelInteractionWith proxy a b
   print result
 

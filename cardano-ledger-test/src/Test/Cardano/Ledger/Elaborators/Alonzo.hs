@@ -9,6 +9,7 @@
 
 module Test.Cardano.Ledger.Elaborators.Alonzo where
 
+import qualified Cardano.Ledger.Alonzo.PParams
 import qualified Cardano.Crypto.DSIGN.Class as DSIGN
 import qualified Cardano.Crypto.KES.Class as KES
 import Cardano.Crypto.Util (SignableRepresentation)

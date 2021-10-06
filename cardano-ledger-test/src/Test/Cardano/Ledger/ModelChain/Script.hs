@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -14,6 +15,8 @@
 
 module Test.Cardano.Ledger.ModelChain.Script where
 
+import Quiet (Quiet (..))
+import Test.Cardano.Ledger.Alonzo.PlutusScripts as TestScripts
 import qualified Cardano.Ledger.Alonzo.Scripts as Alonzo
 import qualified Cardano.Ledger.Crypto as C
 import Cardano.Ledger.Keys
@@ -47,7 +50,7 @@ deriving instance Eq (ModelAddress k)
 
 deriving instance Ord (ModelAddress k)
 
-deriving instance Show (ModelAddress k)
+deriving via (Quiet (ModelAddress k)) instance Show (ModelAddress k)
 
 instance GHC.IsString (ModelAddress k) where
   fromString s = ModelAddress (GHC.fromString s) (GHC.fromString s)
@@ -97,7 +100,10 @@ deriving instance Eq (ModelCredential r k)
 
 deriving instance Ord (ModelCredential r k)
 
-deriving instance Show (ModelCredential r k)
+instance Show (ModelCredential r k) where
+  showsPrec n (ModelKeyHashObj x) = showsPrec n x
+  showsPrec n (ModelScriptHashObj x) = showParen (n >= 11) $
+    showString "ModelScriptHashObj " . showsPrec 11 x
 
 instance GHC.IsString (ModelCredential r k) where
   fromString = ModelKeyHashObj
@@ -145,10 +151,26 @@ deriving instance Ord (ModelScript k)
 
 deriving instance Show (ModelScript k)
 
+-- | enum listing some preprocessed test scripts.
+data PreprocessedPlutusScript
+  = GuessTheNumber3
+  | Evendata3
+  | Odddata3
+  | EvenRedeemer3
+  | OddRedeemer3
+  | SumsTo103
+  | OddRedeemer2
+  | EvenRedeemer2
+  | RedeemerIs102
+  deriving (Eq, Ord, Show, Bounded, Enum, Generic)
+
+instance NFData PreprocessedPlutusScript
+
 data ModelPlutusScript
   = ModelPlutusScript_AlwaysSucceeds Natural
   | ModelPlutusScript_AlwaysFails Natural
-  | ModelPlutusScript_Parity Integer [Bool]
+  | ModelPlutusScript_Preprocessed PreprocessedPlutusScript
+  | ModelPlutusScript_Salt Integer ModelPlutusScript
   deriving (Eq, Ord, Show, Generic)
 
 instance NFData ModelPlutusScript
@@ -196,10 +218,25 @@ elaborateModelTimelock f = go
       ModelTimelock_TimeStart slotNo -> pure $ RequireTimeStart slotNo
       ModelTimelock_TimeExpire slotNo -> pure $ RequireTimeExpire slotNo
 
+elaboratePreprocessedPlutusScript :: PreprocessedPlutusScript -> Alonzo.Script x
+elaboratePreprocessedPlutusScript = \case
+  GuessTheNumber3 -> TestScripts.guessTheNumber3
+  Evendata3 -> TestScripts.evendata3
+  Odddata3 -> TestScripts.odddata3
+  EvenRedeemer3 -> TestScripts.evenRedeemer3
+  OddRedeemer3 -> TestScripts.oddRedeemer3
+  SumsTo103 -> TestScripts.sumsTo103
+  OddRedeemer2 -> TestScripts.oddRedeemer2
+  EvenRedeemer2 -> TestScripts.evenRedeemer2
+  RedeemerIs102 -> TestScripts.redeemerIs102
+
 elaborateModelScript ::
   ModelPlutusScript ->
   Alonzo.Script era
 elaborateModelScript = \case
   ModelPlutusScript_AlwaysSucceeds n -> Alonzo.alwaysSucceeds n
   ModelPlutusScript_AlwaysFails n -> Alonzo.alwaysFails n
-  ModelPlutusScript_Parity n ps -> Alonzo.sumEvenArgs n ps
+  ModelPlutusScript_Preprocessed p -> elaboratePreprocessedPlutusScript p
+  ModelPlutusScript_Salt n ps -> Alonzo.saltFunction n $ case elaborateModelScript ps of
+    Alonzo.TimelockScript {} -> error $ "not supposted to be a timelock script: " <> show ps
+    Alonzo.PlutusScript ps' -> ps'
