@@ -65,6 +65,7 @@ import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Trans.State as State hiding (get, gets, state)
 import qualified Control.Monad.Writer as Writer
 import Data.Coerce
+import Data.Bool (bool)
 import Data.Default.Class
 import Data.Foldable
 import Data.Function (on)
@@ -1146,6 +1147,24 @@ class
               _txBodyArguments_isValid = mtxValidity
             }
 
+      let printLengths =
+            error
+              ( "ModelTx inputs length: " <> (show $ length mtxInputs)
+                  <> ", txBodyInputs length: "
+                  <> (show $ length $ _txBodyArguments_inputs txBodyArguments)
+                  <> ", ins: "
+                  <> (show mtxInputs)
+              )
+      bool (pure ()) printLengths $ (length mtxInputs) /= (length $ _txBodyArguments_inputs txBodyArguments)
+
+      let printOutputLengths =
+            error
+              ( "ModelTx outputs length: " <> (show $ length mtxOutputs)
+                  <> ", txBodyOutputs length: "
+                  <> (show $ length $ _txBodyArguments_outputs txBodyArguments)
+              )
+      bool (pure ()) printOutputLengths $ (length mtxOutputs) /= (length $ _txBodyArguments_outputs txBodyArguments)
+
       nes <- State.gets fst
       witA <- zoom _2 $ traverse (getKeyPairFor proxy) $ Set.toList mtxWits
 
@@ -1364,20 +1383,20 @@ compareModelLedger hint = do
   --     ]
   pure ()
 
-compareModelLedgerImpl :: ModelLedger (EraFeatureSet era) -> NewEpochState era -> [ElaboratorLedgerIssue era]
-compareModelLedgerImpl ml@(ModelLedger mutxos msnapshots mepochNo mrewards mrupd mprevpp macct) nes = Writer.execWriter $ do
-  unless
-    ( length (_modelUTxOMap_utxos mutxos)
-      == length (UTxO.unUTxO $ LedgerState._utxo $ LedgerState._utxoState $  LedgerState.esLState $ LedgerState.nesEs nes)
-    ) $ Writer.tell [MissingUtxos]
-  unless (mepochNo == LedgerState.nesEL nes)
-    $ Writer.tell [WrongEpoch]
-  unless (_modelAccounts_treasury macct == LedgerState._treasury (LedgerState.esAccountState $ LedgerState.nesEs nes))
-    $ Writer.tell [MismatchedTreasury]
-  unless (_modelAccounts_reserves macct == LedgerState._reserves (LedgerState.esAccountState $ LedgerState.nesEs nes))
-    $ Writer.tell [MismatchedReserves]
-  -- unless (_modelAccounts_fees macct == LedgerState._fees (LedgerState._utxoState $ LedgerState.esLState $ LedgerState.nesEs nes))
-  --   $ Writer.tell [MismatchedFees]
+-- compareModelLedgerImpl :: ModelLedger (EraFeatureSet era) -> NewEpochState era -> [ElaboratorLedgerIssue era]
+-- compareModelLedgerImpl ml@(ModelLedger mutxos msnapshots mepochNo mrewards mrupd mprevpp macct) nes = Writer.execWriter $ do
+--   unless
+--     ( length (_modelUTxOMap_utxos mutxos)
+--       == length (UTxO.unUTxO $ LedgerState._utxo $ LedgerState._utxoState $  LedgerState.esLState $ LedgerState.nesEs nes)
+--     ) $ Writer.tell [MissingUtxos]
+--   unless (mepochNo == LedgerState.nesEL nes)
+--     $ Writer.tell [WrongEpoch]
+--   unless (_modelAccounts_treasury macct == LedgerState._treasury (LedgerState.esAccountState $ LedgerState.nesEs nes))
+--     $ Writer.tell [MismatchedTreasury]
+--   unless (_modelAccounts_reserves macct == LedgerState._reserves (LedgerState.esAccountState $ LedgerState.nesEs nes))
+--     $ Writer.tell [MismatchedReserves]
+--   -- unless (_modelAccounts_fees macct == LedgerState._fees (LedgerState._utxoState $ LedgerState.esLState $ LedgerState.nesEs nes))
+--   --   $ Writer.tell [MismatchedFees]
 
 data ElaboratorLedgerIssue era
   = MissingUtxos

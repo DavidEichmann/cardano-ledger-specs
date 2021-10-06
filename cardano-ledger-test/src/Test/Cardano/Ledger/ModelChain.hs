@@ -29,6 +29,7 @@
 
 module Test.Cardano.Ledger.ModelChain where
 
+import Debug.Trace (trace)
 import qualified Control.Monad.Trans.RWS.Strict as RWS
 import Cardano.Slotting.EpochInfo.API
 import Cardano.Ledger.Alonzo.Scripts (ExUnits (..))
@@ -55,12 +56,15 @@ import Data.Bifunctor (first)
 import Data.Bool (bool)
 import Data.Foldable (fold)
 import Control.Monad.Trans.Class
+import Data.Foldable (fold)
+import Data.Foldable (fold, for_)
 import Data.Group
 import Data.Kind (Type)
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
 import Data.Maybe (mapMaybe)
+import qualified Data.Map.Merge.Strict as Map
 import Data.Proxy
 import Data.Semigroup (Sum (..))
 import Data.Set (Set)
@@ -325,7 +329,7 @@ data ModelTx (era :: FeatureSet) = ModelTx
     _mtxRedeemers :: !(Map.Map (ModelScriptPurpose era) (PlutusTx.Data, ExUnits)),
     _mtxWitnessSigs :: !(Set (ModelCredential 'Witness ('TyScriptFeature 'False 'False)))
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelTx era)
 
@@ -480,7 +484,7 @@ data ModelBlock era = ModelBlock
   { _modelBlock_slot :: SlotNo,
     _modelBlock_txSeq :: [ModelTx era]
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelBlock era)
 
@@ -508,7 +512,7 @@ newtype ModelPoolId = ModelPoolId {unModelPoolId :: ModelCredential 'StakePool (
 deriving newtype instance Show ModelPoolId
 
 newtype ModelBlocksMade = ModelBlocksMade {unModelBlocksMade :: Map.Map ModelPoolId Natural}
-  deriving (Generic, NFData)
+  deriving (Generic, NFData, Eq)
   deriving Show via Quiet ModelBlocksMade
   deriving Semigroup via GrpMap ModelPoolId (Sum Natural)
   deriving Monoid via GrpMap ModelPoolId (Sum Natural)
@@ -533,7 +537,7 @@ data ModelEpoch era = ModelEpoch
   { _modelEpoch_blocks :: [ModelBlock era],
     _modelEpoch_blocksMade :: ModelBlocksMade
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance NFData (ModelEpoch era)
 
@@ -686,9 +690,9 @@ deriving newtype instance MonadWriter (ModelLedgerError era) (ModelM era)
 deriving newtype instance MonadState (ModelLedger era) (ModelM era)
 
 data ModelSnapshot era = ModelSnapshot
-  { _modelSnapshot_stake :: GrpMap (ModelCredential 'Staking (ScriptFeature era)) Coin,
-    _modelSnapshot_delegations :: Map.Map (ModelCredential 'Staking (ScriptFeature era)) ModelPoolId,
-    _modelSnapshot_pools :: Map.Map ModelPoolId (ModelPoolParams era)
+  { _modelSnapshot_stake :: Map.Map (ModelCredential 'Staking (ScriptFeature era)) (ModelUTxOMap era, ModelTxNo),
+    _modelSnapshot_delegations :: Map.Map (ModelCredential 'Staking (ScriptFeature era)) (ModelPoolId, ModelTxNo),
+    _modelSnapshot_pools :: Map.Map ModelPoolId (ModelPoolParams era, ModelTxNo)
   }
   deriving (Eq, Generic)
   deriving (Show) via Quiet (ModelSnapshot era)
@@ -698,34 +702,37 @@ instance NFData (ModelSnapshot era)
 emptyModelSnapshot :: ModelSnapshot era
 emptyModelSnapshot = ModelSnapshot mempty Map.empty Map.empty
 
-modelSnapshot_stake :: Lens' (ModelSnapshot era) (GrpMap (ModelCredential 'Staking (ScriptFeature era)) Coin)
+modelSnapshot_stake :: Lens' (ModelSnapshot era) (Map.Map (ModelCredential 'Staking (ScriptFeature era)) (ModelUTxOMap era, ModelTxNo))
 modelSnapshot_stake a2fb s = (\b -> s {_modelSnapshot_stake = b}) <$> a2fb (_modelSnapshot_stake s)
 {-# INLINE modelSnapshot_stake #-}
 
-modelSnapshot_delegations :: Lens' (ModelSnapshot era) (Map.Map (ModelCredential 'Staking (ScriptFeature era)) ModelPoolId)
+modelSnapshot_delegations :: Lens' (ModelSnapshot era) (Map.Map (ModelCredential 'Staking (ScriptFeature era)) (ModelPoolId, ModelTxNo))
 modelSnapshot_delegations a2fb s = (\b -> s {_modelSnapshot_delegations = b}) <$> a2fb (_modelSnapshot_delegations s)
 {-# INLINE modelSnapshot_delegations #-}
 
-modelSnapshot_pools :: Lens' (ModelSnapshot era) (Map.Map ModelPoolId (ModelPoolParams era))
+modelSnapshot_pools :: Lens' (ModelSnapshot era) (Map.Map ModelPoolId (ModelPoolParams era, ModelTxNo))
 modelSnapshot_pools a2fb s = (\b -> s {_modelSnapshot_pools = b}) <$> a2fb (_modelSnapshot_pools s)
 {-# INLINE modelSnapshot_pools #-}
 
 data ModelUTxOMap era = ModelUTxOMap
   { _modelUTxOMap_utxos :: !(Map.Map ModelUTxOId (Coin, ModelTxOut era)),
-    _modelUTxOMap_stake :: !(GrpMap (ModelCredential 'Staking (ScriptFeature era)) Coin),
-    _modelUTxOMap_collateralUtxos :: !(Set ModelUTxOId)
+    _modelUTxOMap_stake :: !(GrpMap (ModelCredential 'Staking (ScriptFeature era)) (Coin, Set ModelUTxOId)),
+    _modelUTxOMap_collateralUtxos :: !(Set ModelUTxOId),
+    _modelUTxOMap_balance :: !Coin -- TODO: ModelValueSimple
   }
   deriving (Eq, Show, Generic)
 
 instance Semigroup (ModelUTxOMap era) where
-  ModelUTxOMap utxos stake collateral <> ModelUTxOMap utxos' stake' collateral' =
+  -- TODO: this instance doublecounts stake
+  ModelUTxOMap utxos stake collateral bal <> ModelUTxOMap utxos' stake' collateral' bal' =
     ModelUTxOMap
       (Map.unionWith (\x y -> if x == y then x else error $ unwords ["unmergable ModelUTxOMap:", show x, "/=", show y]) utxos utxos')
       (stake <> stake')
       (Set.union collateral collateral')
+      (bal <> bal')
 
 instance Monoid (ModelUTxOMap era) where
-  mempty = ModelUTxOMap Map.empty mempty Set.empty
+  mempty = ModelUTxOMap Map.empty mempty Set.empty mempty
 
 mkModelUTxOMap ::
   forall era.
@@ -736,16 +743,14 @@ mkModelUTxOMap =
   foldMap $ \(ui, ma, val) ->
     ModelUTxOMap
       (Map.singleton ui (val, ModelTxOut ma (modelValueInject val) dh))
-      (grpMapSingleton (_modelAddress_stk ma) val)
+      (grpMapSingleton (_modelAddress_stk ma) (val, Set.singleton ui))
       (bool Set.empty (Set.singleton ui) $ has (modelAddress_pmt . _ModelKeyHashObj) ma)
+      val
   where
     dh = ifSupportsPlutus (Proxy :: Proxy (ScriptFeature era)) () Nothing
 
 getModelUTxOMapTotalAda :: ModelUTxOMap era -> Coin
-getModelUTxOMapTotalAda = fold . _modelUTxOMap_stake
-
-getStake :: Map.Map ModelUTxOId (Coin, ModelTxOut era) -> GrpMap (ModelCredential 'Staking (ScriptFeature era)) Coin
-getStake = foldMap (\(val, txo) -> grpMapSingleton (_modelAddress_stk $ _mtxo_address txo) val)
+getModelUTxOMapTotalAda = _modelUTxOMap_balance
 
 getModelValueCoin :: ModelValue a c -> Coin
 getModelValueCoin = foldMap Val.coin . evalModelValueSimple . unModelValue
@@ -759,9 +764,20 @@ spendModelUTxOs ins outs xs =
   let ins' = Map.restrictKeys (_modelUTxOMap_utxos xs) ins
       outs' = Map.fromList $ (fmap . fmap) (getModelValueCoin . _mtxo_value &&& id) outs
       newCollateral = foldMap (\(ui, txo) -> bool Set.empty (Set.singleton ui) $ has (modelTxOut_address . modelAddress_pmt . _ModelKeyHashObj) txo) outs
+      getStake :: Map.Map ModelUTxOId (Coin, ModelTxOut era) -> GrpMap (ModelCredential 'Staking (ScriptFeature era)) (Coin, Set ModelUTxOId)
+      getStake = ifoldMap (\ui (val, txo) -> grpMapSingleton (_modelAddress_stk $ _mtxo_address txo) (val, Set.singleton ui))
+
+      mergeStake :: (Coin, Set ModelUTxOId) -> (Coin, Set ModelUTxOId) -> (Coin, Set ModelUTxOId)
+      mergeStake (c, ui) (c', ui') = (c' ~~ c, Set.difference ui' ui)
+
    in ModelUTxOMap
         { _modelUTxOMap_utxos = Map.withoutKeys (_modelUTxOMap_utxos xs `Map.union` outs') ins,
-          _modelUTxOMap_stake = _modelUTxOMap_stake xs <> getStake outs' ~~ getStake ins',
+          _modelUTxOMap_stake = flip State.execState (_modelUTxOMap_stake xs) $ do
+            id <>= getStake outs'
+            State.modify $ zipWithGrpMap mergeStake $ getStake ins'
+          ,
+          _modelUTxOMap_balance = _modelUTxOMap_balance xs <> foldMap fst outs' ~~ foldMap fst ins',
+
           _modelUTxOMap_collateralUtxos =
             Set.difference (_modelUTxOMap_collateralUtxos xs) ins
               `Set.union` newCollateral
@@ -781,7 +797,10 @@ instance At (ModelUTxOMap era) where
     let a = Map.lookup k $ _modelUTxOMap_utxos s
         b2t :: Maybe (ModelTxOut era) -> ModelUTxOMap era
         b2t b =
-          let val = foldMap (getModelValueCoin . _mtxo_value) b
+          let val' = foldMap fst $ Map.lookup k $ _modelUTxOMap_utxos s
+              val = foldMap (getModelValueCoin . _mtxo_value) b
+              hodler' = fmap (_modelAddress_stk . _mtxo_address . snd) $ Map.lookup k $ _modelUTxOMap_utxos s
+              hodler = _modelAddress_stk . _mtxo_address <$> b
            in ModelUTxOMap
                 { _modelUTxOMap_utxos = set (at k) (fmap ((,) val) b) (_modelUTxOMap_utxos s),
                   _modelUTxOMap_collateralUtxos =
@@ -789,10 +808,14 @@ instance At (ModelUTxOMap era) where
                       (at k)
                       (() <$ preview (_Just . modelTxOut_address . modelAddress_pmt . _ModelKeyHashObj) b)
                       (_modelUTxOMap_collateralUtxos s),
-                  _modelUTxOMap_stake =
-                    _modelUTxOMap_stake s
-                      <> foldMap (\(val', ui) -> grpMapSingleton (_modelAddress_stk $ _mtxo_address ui) (invert val')) a
-                      <> foldMap (\ui -> grpMapSingleton (_modelAddress_stk $ _mtxo_address ui) val) b
+                  _modelUTxOMap_stake = flip State.execState (_modelUTxOMap_stake s) $ do
+                    for_ hodler' $ \h -> do
+                      grpMap h . _1 <>= invert val'
+                      grpMap h . _2 %= Set.delete k
+                    for_ hodler $ \h -> do
+                      grpMap h . _1 <>= val'
+                      grpMap h . _2 %= Set.insert k
+                  , _modelUTxOMap_balance = _modelUTxOMap_balance s <> val ~~ val'
                 }
      in b2t <$> (a2fb $ fmap snd a)
 
@@ -832,6 +855,32 @@ modelAccounts_feeSS :: Lens' ModelAccounts Coin
 modelAccounts_feeSS a2fb s = (\b -> s {_modelAccounts_feeSS = b}) <$> a2fb (_modelAccounts_feeSS s)
 {-# INLINE modelAccounts_feeSS #-}
 
+newtype ModelTxNo = ModelTxNo {unModelTxNo :: Integer}
+  deriving (Eq, NFData, Num, Ord, Show)
+
+data ModelRewardProvenanceDelegate = ModelRewardProvenanceDelegate
+  { _modelRewardProvenanceDelegate_stakeRegistration :: ModelTxNo,
+    _modelRewardProvenanceDelegate_poolRegistration :: ModelTxNo,
+    _modelRewardProvenanceDelegate_delegation :: ModelTxNo
+  }
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenanceDelegate
+
+data ModelRewardProvenancePool = ModelRewardProvenancePool
+  { _modelRewardProvenancePool_poolRegistration :: ModelTxNo
+  }
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenancePool
+
+data ModelRewardProvenance
+  = ModelRewardProvenance_Delegate ModelRewardProvenanceDelegate
+  | ModelRewardProvenance_Pool ModelRewardProvenancePool
+  deriving (Eq, Generic, Show)
+
+instance NFData ModelRewardProvenance
+
 data ModelLedger era = ModelLedger
   { _modelLedger_utxos :: (ModelUTxOMap era),
     _modelLedger_stake :: (SnapshotQueue (ModelSnapshot era)),
@@ -839,7 +888,10 @@ data ModelLedger era = ModelLedger
     _modelLedger_rewards :: (Map.Map (ModelCredential 'Staking (ScriptFeature era)) Coin),
     _modelLedger_rewardUpdates :: !(ModelRewardUpdate era),
     _modelLedger_prevPp :: !(PParams ()),
-    _modelLedger_accounts :: !ModelAccounts
+    _modelLedger_accounts :: !ModelAccounts,
+    _modelLedger_rewardsProv :: GrpMap (ModelCredential 'Staking (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance)),
+    _modelLedger_rewardUpdatesProv :: GrpMap (ModelCredential 'Staking (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance)),
+    _modelLedger_nextTxNo :: ModelTxNo
   }
   deriving (Eq, Show, Generic)
 
@@ -871,8 +923,11 @@ mkModelLedger globals pp utxos =
       _modelLedger_epoch = 0,
       _modelLedger_rewards = Map.empty,
       _modelLedger_rewardUpdates = mempty,
+      _modelLedger_rewardsProv = mempty,
+      _modelLedger_rewardUpdatesProv = mempty,
       _modelLedger_prevPp = pp, -- emptyPParams
-      _modelLedger_accounts = ModelAccounts Val.zero reserves Val.zero Val.zero
+      _modelLedger_accounts = ModelAccounts Val.zero reserves Val.zero Val.zero,
+      _modelLedger_nextTxNo = 0
      }
   where
       reserves =
@@ -916,9 +971,17 @@ modelLedger_rewards :: Lens' (ModelLedger era) (Map.Map (ModelCredential 'Stakin
 modelLedger_rewards a2fb s = (\b -> s {_modelLedger_rewards = b}) <$> a2fb (_modelLedger_rewards s)
 {-# INLINE modelLedger_rewards #-}
 
+modelLedger_rewardsProv :: Lens' (ModelLedger era) (GrpMap (ModelCredential 'Staking (ScriptFeature era)) ((Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))))
+modelLedger_rewardsProv a2fb s = (\b -> s {_modelLedger_rewardsProv = b}) <$> a2fb (_modelLedger_rewardsProv s)
+{-# INLINE modelLedger_rewardsProv #-}
+
 modelLedger_rewardUpdates :: Lens' (ModelLedger era) (ModelRewardUpdate era)
 modelLedger_rewardUpdates a2fb s = (\b -> s {_modelLedger_rewardUpdates = b}) <$> a2fb (_modelLedger_rewardUpdates s)
 {-# INLINE modelLedger_rewardUpdates #-}
+
+modelLedger_rewardUpdatesProv :: Lens' (ModelLedger era) (GrpMap (ModelCredential 'Staking (ScriptFeature era)) ((Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))))
+modelLedger_rewardUpdatesProv a2fb s = (\b -> s {_modelLedger_rewardUpdatesProv = b}) <$> a2fb (_modelLedger_rewardUpdatesProv s)
+{-# INLINE modelLedger_rewardUpdatesProv #-}
 
 modelLedger_accounts :: Lens' (ModelLedger era) ModelAccounts
 modelLedger_accounts a2fb s = (\b -> s {_modelLedger_accounts = b}) <$> a2fb (_modelLedger_accounts s)
@@ -928,22 +991,55 @@ modelLedger_prevPp :: Lens' (ModelLedger era) (PParams ())
 modelLedger_prevPp a2fb s = (\b -> s {_modelLedger_prevPp = b}) <$> a2fb (_modelLedger_prevPp s)
 {-# INLINE modelLedger_prevPp #-}
 
--- applyModelDCert :: ModelDCert era -> ModelSnapshot era -> ModelSnapshot era
-applyModelDCert :: (MonadState st m, HasModelLedger era st) => ModelDCert era -> m ()
-applyModelDCert =
-  let mark = modelLedger . modelLedger_stake . snapshotQueue_mark
-   in \case
-        ModelRegisterStake maddr -> modelLedger . modelLedger_rewards . at maddr %= (<|> Just Val.zero)
-        ModelDeRegisterStake maddr -> do
-          modelLedger . modelLedger_rewards . at maddr .= Nothing
-          mark . modelSnapshot_delegations . at maddr .= Nothing
-        ModelDelegate (ModelDelegation maddr poolId) -> mark . modelSnapshot_delegations . at maddr .= Just poolId
-        ModelRegisterPool pool -> mark . modelSnapshot_pools . at (_mppId pool) .= Just pool
-        -- TODO: deal with epochNo
-        ModelRetirePool poolId _epochNo -> mark . modelSnapshot_pools . at poolId .= Nothing
+modelLedger_nextTxNo :: Lens' (ModelLedger era) ModelTxNo
+modelLedger_nextTxNo a2fb s = (\b -> s {_modelLedger_nextTxNo = b}) <$> a2fb (_modelLedger_nextTxNo s)
 
+getSubUTxOMapForStake :: ModelCredential 'Staking (ScriptFeature era) -> ModelUTxOMap era -> ModelUTxOMap era
+getSubUTxOMapForStake maddr utxos = ModelUTxOMap
+  (Map.restrictKeys (_modelUTxOMap_utxos utxos) uis)
+  (grpMapSingleton maddr stake)
+  (Set.intersection uis $ _modelUTxOMap_collateralUtxos utxos)
+  bal
+  where
+    stake@(bal, uis) = view (grpMap maddr) (_modelUTxOMap_stake utxos)
+
+applyModelDCert :: (MonadState st m, HasModelLedger era st) => ModelTxNo -> ModelDCert era -> m ()
+applyModelDCert txNo dCert = do
+  utxosMap <- use $ modelLedger . modelLedger_utxos
+  let mark = modelLedger . modelLedger_stake . snapshotQueue_mark
+  case dCert of
+    ModelRegisterStake maddr -> do
+      modelLedger . modelLedger_rewards . at maddr %= (<|> Just Val.zero)
+      mark . modelSnapshot_stake . at maddr .= Just (getSubUTxOMapForStake maddr utxosMap , txNo)
+    ModelDeRegisterStake maddr -> do
+      modelLedger . modelLedger_rewards . at maddr .= Nothing
+      mark . modelSnapshot_stake . at maddr .= Nothing
+      mark . modelSnapshot_delegations . at maddr .= Nothing
+    ModelDelegate (ModelDelegation maddr poolId) -> mark . modelSnapshot_delegations . at maddr .= Just (poolId, txNo)
+    ModelRegisterPool pool -> mark . modelSnapshot_pools . at (_mppId pool) .= Just (pool, txNo)
+    ModelRetirePool poolId _epochNo -> mark . modelSnapshot_pools . at poolId .= Nothing -- TODO: deal with epochNo
+
+spendStake ::
+  ModelUTxOMap era ->
+  Set ModelUTxOId ->
+  [(ModelUTxOId, ModelTxOut era)] ->
+  ModelSnapshot era ->
+  ModelSnapshot era
+spendStake utxosMap ins outs = State.execState $ do
+  for_ ins $ \ui -> do
+    let mUiOwner = utxosMap ^. at ui
+    for_ mUiOwner $ \(ModelTxOut (ModelAddress _ uiOwner) _ _) ->
+      modelSnapshot_stake . ix uiOwner . _1 %= spendModelUTxOs (Set.singleton ui) []
+
+  for_ outs $ \u@(_, (ModelTxOut (ModelAddress _ uiOwner) _ _)) -> do
+    modelSnapshot_stake . ix uiOwner . _1 %= spendModelUTxOs Set.empty [u]
+
+
+-- TODO: take _mtxValidity into account
 applyModelTx :: HasModelM era st r m => ModelTx era -> m ()
 applyModelTx tx = do
+  utxosMap <- use $ modelLedger . modelLedger_utxos
+  modelLedger . modelLedger_stake . snapshotQueue_mark %= spendStake utxosMap (_mtxInputs tx) (_mtxOutputs tx)
   -- spend inputs/add outputs
   modelLedger . modelLedger_utxos %= spendModelUTxOs (_mtxInputs tx) (_mtxOutputs tx)
   -- withdraw rewards
@@ -953,53 +1049,92 @@ applyModelTx tx = do
     (Map.zipWithMatched $ \_ x y -> Val.zero) -- TODO: validate (== 0) (y - eval x)
     (_mtxWdrl tx)
 
+  modelLedger . modelLedger_rewardsProv . _GrpMap %= (`Map.difference` (_mtxWdrl tx))
+
+  -- accumulate fees
   modelLedger . modelLedger_accounts . modelAccounts_fees <>= getModelValueCoin (_mtxFee tx)
 
+  txNo <- modelLedger . modelLedger_nextTxNo <+= 1
   -- apply certs
-  forOf_ (modelTx_dCert . traverse) tx applyModelDCert
+  forOf_ (modelTx_dCert . traverse) tx $ applyModelDCert txNo
 
 minStakeForRewards :: Coin
 minStakeForRewards = Coin 200
 
--- applyModelBlocksMade :: forall era. ModelBlocksMade -> Globals -> ModelLedger era -> ModelLedger era
+-- getUtxoSetFromAddress :: ModelUTxOMap era -> Map.Map (ModelAddress (ScriptFeature era)) (Set ModelUTxOId)
+-- getUtxoSetFromAddress (ModelUTxOMap utxos _) = Map.fromListWith Set.union $ foldr grabPairs [] $ Map.toList utxos
+--   where
+--     grabPairs (utxo, (_, (ModelTxOut addr _ _))) xs = (addr, Set.singleton utxo) : xs
+
+getCoinUTxOsfromUTxoMap :: ModelUTxOMap era -> (Coin, Set ModelUTxOId)
+getCoinUTxOsfromUTxoMap (ModelUTxOMap utxos _ _ balances) = (balances, Map.keysSet utxos)
+
+getTotalDeposits :: ModelUTxOMap era -> Coin
+getTotalDeposits (ModelUTxOMap _ _ _ balances) = balances
+
+
 applyModelBlocksMade :: forall era m st r. HasModelM era st r m => ModelBlocksMade -> m ()
 applyModelBlocksMade blocksMade = do
-  -- we don't actually keep the stake qty in the mark field up to date, we need
-  -- to compute it's correct value at the time of snapshot.
-  -- TODO: keep the stake qty up to date.
-  stakeMark ::
-    GrpMap (ModelCredential 'Staking (ScriptFeature era)) Coin <-
-    uses (modelLedger . modelLedger_utxos) $ _modelUTxOMap_stake
-
-  rewards <- use (modelLedger . modelLedger_rewards)
-
-  modelLedger . modelLedger_stake . snapshotQueue_mark . modelSnapshot_stake
-    .= GrpMap (Map.merge
-        Map.dropMissing
-        (Map.mapMissing (\_ _ -> mempty))
-        (Map.zipWithMatched (\_ x _ -> x))
-        (unGrpMap stakeMark)
-        rewards
-    )
-
-  -- take a snapshot
+  epochNo <- use $ modelLedger . modelLedger_epoch
 
   es <- use modelLedger
   rupd <- use (modelLedger . modelLedger_rewardUpdates)
   g <- asks getGlobals
   modelLedger . modelLedger_rewardUpdates .= createRUpd blocksMade es g
 
-  modelLedger . modelLedger_stake %= snd . shiftSnapshotQueue
+  -- take a snapshot
+  ModelSnapshot stakes' delegs' pools <- modelLedger . modelLedger_stake %%= shiftSnapshotQueue
 
   applyRUpd rupd
 
+  let stakes :: GrpMap (ModelCredential 'Staking (ScriptFeature era)) (ModelUTxOMap era)
+      stakes = mkGrpMap $ fmap fst stakes'
+      delegs :: GrpMap ModelPoolId (Coin, Set (ModelCredential 'Staking (ScriptFeature era)))
+      delegs = ifoldMap (\addr (poolId, _) -> GrpMap . Map.singleton poolId $ (getTotalDeposits (view (grpMap addr) stakes), Set.singleton addr)) delegs'
+
+      rewards :: GrpMap (ModelCredential 'Staking (ScriptFeature era)) (Map.Map (EpochNo, ModelPoolId) (Set ModelUTxOId, ModelRewardProvenance))
+      rewards = flip ifoldMap (Map.intersectionWith (,) (unModelBlocksMade blocksMade) pools) $ \poolId (blockWeight, (pool, poolRegistration)) -> fold $ do
+        guard (blockWeight >= 0) -- only if the pool makes *some* number of blocks
+        let (dstake, deleg) = view (grpMap poolId) delegs
+        guard (dstake >= _mppPledge pool) -- and the pool met its pledge
+        let memberRewards, operatorRewards :: Map.Map (ModelCredential 'Staking (ScriptFeature era)) (Set ModelUTxOId, ModelRewardProvenance)
+            memberRewards =
+              imap
+                ( \i (_, a) ->
+                    ( a,
+                      ModelRewardProvenance_Delegate $
+                        ModelRewardProvenanceDelegate
+                          (maybe (error "invalid stake registration") snd $ Map.lookup i stakes')
+                          poolRegistration
+                          (maybe (error "invalid delegation") snd $ Map.lookup i delegs')
+                    )
+                )
+                . Map.filter ((>= minStakeForRewards) . fst)
+                $ fmap getCoinUTxOsfromUTxoMap $ -- only if they have a minimum stake amount
+                  Map.restrictKeys (unGrpMap stakes) deleg -- pay the delegates
+            operatorRewards =
+              Map.singleton
+                (_mppRAcnt pool)
+                ( Set.empty, -- TODO: All of the delegates staked
+                  ModelRewardProvenance_Pool $
+                    ModelRewardProvenancePool poolRegistration
+                )
+            reward =
+              (if _mppMargin pool < maxBound then memberRewards else Map.empty) -- pay delegates if margin is less than 100%
+                <> (if _mppMargin pool > minBound then operatorRewards else Map.empty) -- pay the pool if the margin is more than 0%
+        Just $ mkGrpMap $ fmap (Map.singleton (epochNo, poolId)) $ reward
+
+  -- accumulate new rewards
+  rewardUpdates <- modelLedger . modelLedger_rewardUpdatesProv <<.= rewards
+
+  -- distribute accumulated rewards
+  modelLedger . modelLedger_rewardsProv <>= rewardUpdates
+
   modelLedger . modelLedger_epoch += 1
 
--- applyModelEpoch :: ModelEpoch era -> Globals -> ModelLedger era -> ModelLedger era
 applyModelEpoch :: HasModelM era st r m => ModelEpoch era -> m ()
 applyModelEpoch epoch = do
   forOf_ (modelEpoch_blocks . traverse . modelBlock_txSeq . traverse) epoch applyModelTx
-  -- State.modify $
   applyModelBlocksMade (_modelEpoch_blocksMade epoch)
 
 data SnapshotQueue a = SnapshotQueue
@@ -1104,9 +1239,9 @@ createRUpd
       , _modelLedger_epoch = currentEpoch
       , _modelLedger_stake = SnapshotQueue
         { _snapshotQueue_go = ModelSnapshot
-          { _modelSnapshot_stake = GrpMap stake
-          , _modelSnapshot_delegations = delegs
-          , _modelSnapshot_pools = poolSS
+          { _modelSnapshot_stake = fmap (getModelUTxOMapTotalAda . fst) -> stake
+          , _modelSnapshot_delegations = fmap fst -> delegs
+          , _modelSnapshot_pools = fmap fst -> poolSS
           }
         }
       , _modelLedger_accounts = ModelAccounts
@@ -1196,6 +1331,12 @@ r_member f_hat (ModelPoolParams {_mppCost = c, _mppMargin = (unboundRational -> 
 unsafeFromRational :: BoundedRational r => String -> Rational -> r
 unsafeFromRational clue x = maybe (error $ "unsafeFromRational " <> clue <> " out of bounds:" <> show x) id $ boundRational x
 
+safeFromRationalBad :: forall r. BoundedRational r => String -> Rational -> r
+safeFromRationalBad clue x
+  | x < unboundRational (minBound :: r) = trace ("safeFromRationalBad " <> clue <> " clip below:" <> show x) $ minBound
+  | x > unboundRational (maxBound :: r) = trace ("safeFromRationalBad " <> clue <> " clip above:" <> show x) $ minBound
+  | otherwise = unsafeFromRational clue x
+
 rewardOnePoolModel ::
   PParams x ->
   Coin ->
@@ -1222,18 +1363,21 @@ rewardOnePoolModel
     = rewards
   where
     ostake = coinToRational $ fold stake
-    p_r = unsafeFromRational "rewardOnePoolModel::p_r" $ pledge / tot
+    p_r = safeFromRationalBad "rewardOnePoolModel::p_r" $ pledge / tot
+
+    sigma_unit = (safeFromRationalBad "rewardOnePoolModel::sigma" sigma)
+    sigma_unit' = (safeFromRationalBad "rewardOnePoolModel::sigma'" sigma)
     maxP
-      | pledge <= ostake = maxPoolModel pp r (unsafeFromRational "rewardOnePoolModel::sigma" sigma) p_r
+      | pledge <= ostake = maxPoolModel pp r sigma_unit' p_r
       | otherwise = Val.zero
     appPerf = mkApparentPerformance (_d pp) sigma_a n nbar
     poolR = rationalToCoin (appPerf * coinToRational maxP)
     mRewards = Map.fromList
-      [ (hk, r_member poolR pool (unsafeFromRational "rewardOnePoolModel::c/tot" $ c / tot) (unsafeFromRational "rewardOnePoolModel::sigma" sigma))
+      [ (hk, r_member poolR pool (safeFromRationalBad "rewardOnePoolModel::c/tot" $ c / tot) sigma_unit)
       | (hk, (coinToRational -> c)) <- Map.toList stake
       , not (elem hk $ fmap liftModelCredential $ _mppOwners pool)
       ]
-    iReward = r_operator poolR pool (unsafeFromRational "rewardOnePoolModel::ostake/tot" $ ostake / tot) (unsafeFromRational "rewardOnePoolModel::sigma" sigma)
+    iReward = r_operator poolR pool (safeFromRationalBad "rewardOnePoolModel::ostake/tot" $ ostake / tot) sigma_unit
     potentialRewards = Map.unionWith (<>) mRewards (Map.singleton (_mppRAcnt pool) iReward)
     rewards = Map.restrictKeys potentialRewards addrs_rew
 
@@ -1282,7 +1426,7 @@ rewardModel
               p
               s
               (sbar / coinToRational total)
-              (unsafeFromRational "rewardModel::sbar/total_a" $ sbar / total_a)
+              (safeFromRationalBad "rewardModel::sbar/total_a" $ sbar / total_a)
               total
               addrs_rew)
       | (hk, (p, n, s)) <- Map.toList pdata

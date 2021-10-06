@@ -339,9 +339,10 @@ genModelTx = do
     st0 <- use modelLedger
     applyModelTx txn
     numDCerts <- liftGen =<< asks (_modelGeneratorParams_numDCerts .  _modelGeneratorContext_modelGeneratorParams)
+    txNo <- use (modelLedger . modelLedger_nextTxNo)
     dcerts <- replicateM numDCerts $ do
       dcert <- genDCert haveCollateral
-      applyModelDCert dcert
+      applyModelDCert txNo dcert
       pure dcert
 
     modelLedger .= st0

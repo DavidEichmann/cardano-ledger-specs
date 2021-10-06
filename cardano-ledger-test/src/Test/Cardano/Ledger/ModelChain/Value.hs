@@ -19,7 +19,7 @@ module Test.Cardano.Ledger.ModelChain.Value where
 import Cardano.Ledger.Coin
 import Cardano.Ledger.Val hiding (invert)
 import Control.DeepSeq
-import Control.Lens (Lens', at, set)
+import Control.Lens (Iso', Lens', at, iso, set)
 import Control.Lens.Indexed (FoldableWithIndex (..), ifoldl)
 import Control.Monad
 import qualified Control.Monad.Except as Except
@@ -76,6 +76,9 @@ grpMapSingleton k v
 mkGrpMap :: (Eq v, Monoid v) => Map.Map k v -> GrpMap k v
 mkGrpMap = GrpMap . Map.filter (mempty /=)
 
+_GrpMap :: (Eq a, Monoid a) => Iso' (GrpMap k a) (Map.Map k a)
+_GrpMap = iso unGrpMap mkGrpMap
+
 grpMap :: (Ord k, Eq a, Monoid a) => k -> Lens' (GrpMap k a) a
 grpMap k a2fb (GrpMap s) = (\y -> GrpMap $ set (at k) (y <$ guard (y /= mempty)) s) <$> a2fb (maybe mempty id $ Map.lookup k s)
 
@@ -90,6 +93,16 @@ mapGrpMap f = GrpMap . Map.mapMaybe f' . unGrpMap
   where
     f' x = let y = f x in y <$ guard (y /= mempty)
 {-# INLINE mapGrpMap #-}
+
+zipWithGrpMap :: (Ord k, Eq c, Monoid a, Monoid b, Monoid c) => (a -> b -> c) -> GrpMap k a -> GrpMap k b -> GrpMap k c
+zipWithGrpMap f = \(GrpMap xs) (GrpMap ys) -> GrpMap $ Map.merge
+  (Map.mapMaybeMissing $ \_ x -> f' x mempty)
+  (Map.mapMaybeMissing $ \_ y -> f' mempty y)
+  (Map.zipWithMaybeMatched $ \_ -> f')
+  xs ys
+  where
+    f' x y = let z = f x y in z <$ guard (z /= mempty)
+{-# INLINE zipWithGrpMap #-}
 
 -- | laws: traverseGrpMap (f . const mempty) xs === pure mempty
 traverseGrpMap :: (Eq b, Monoid b, Applicative m) => (a -> m b) -> GrpMap k a -> m (GrpMap k b)
