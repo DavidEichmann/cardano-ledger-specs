@@ -318,8 +318,8 @@ utxoTransition ::
   ) =>
   TransitionRule (AlonzoUTXO era)
 utxoTransition = do
-  TRC (Shelley.UtxoEnv slot pp stakepools _genDelegs, u, tx) <- judgmentContext
-  let Shelley.UTxOState utxo _deposits _fees _ppup = u
+  TRC (Shelley.UtxoEnv slot pp stakepools _genDelegs _ptrs, u, tx) <- judgmentContext
+  let Shelley.UTxOState utxo _deposits _fees _ppup _ = u
 
   {-   txb := txbody tx   -}
   {-   (,i_f) := txvldttx   -}

@@ -26,6 +26,7 @@ module Test.Cardano.Ledger.Shelley.Rules.Chain
   )
 where
 
+import Cardano.Ledger.Address (Addr)
 import Cardano.Ledger.BHeaderView (BHeaderView)
 import Cardano.Ledger.BaseTypes (BlocksMade (..), Globals (..), Nonce (..), ProtVer (..), ShelleyBase, StrictMaybe (..), UnitInterval)
 import Cardano.Ledger.Block (Block (..))
@@ -54,7 +55,7 @@ import Cardano.Ledger.Shelley.API.Wallet
     totalAdaPotsES,
   )
 import Cardano.Ledger.Shelley.Constraints (UsesValue)
-import Cardano.Ledger.Shelley.EpochBoundary (emptySnapShots)
+import Cardano.Ledger.Shelley.EpochBoundary (aggregateUtxoCoinByCredential, emptySnapShots,  Stake (..))
 import Cardano.Ledger.Shelley.LedgerState
   ( AccountState (..),
     DPState (..),
@@ -178,7 +179,9 @@ instance
 
 -- | Creates a valid initial chain state
 initialShelleyState ::
-  ( Default (State (Core.EraRule "PPUP" era))
+  ( Era era,
+    HasField "address" (Core.TxOut era) (Addr (Crypto era)),
+    Default (State (Core.EraRule "PPUP" era))
   ) =>
   WithOrigin (LastAppliedBlock (Crypto era)) ->
   EpochNo ->
@@ -203,6 +206,7 @@ initialShelleyState lab e utxo reserves genDelegs pp initNonce =
                     (Coin 0)
                     (Coin 0)
                     def
+                    (Stake $ aggregateUtxoCoinByCredential mempty utxo mempty)
                 )
                 (DPState (def {_genDelegs = GenDelegs genDelegs}) def)
             )

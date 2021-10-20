@@ -495,7 +495,7 @@ applySTSTest = applySTSOptsEither defaultOpts
   where
     defaultOpts =
       ApplySTSOpts
-        { asoAssertions = AssertionsAll,
+        { asoAssertions = AssertionsOff,
           asoValidation = ValidateAll,
           asoEvents = EPDiscard
         }

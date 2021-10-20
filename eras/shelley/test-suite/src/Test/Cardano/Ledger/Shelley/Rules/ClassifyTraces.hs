@@ -401,6 +401,7 @@ onlyValidChainSignalsAreGenerated ::
   forall era.
   ( EraGen era,
     Default (State (Core.EraRule "PPUP" era)),
+    HasField "address" (Core.TxOut era) (Addr (Crypto era)),
     QC.HasTrace (CHAIN era) (GenEnv era),
     Show (TxSeq era)
   ) =>

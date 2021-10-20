@@ -254,7 +254,8 @@ initialUTxOState aliceKeep msigs =
                         (SlotNo 0)
                         initPParams
                         Map.empty
-                        (GenDelegs Map.empty),
+                        (GenDelegs Map.empty)
+                        mempty,
                       _utxoState genesis,
                       tx
                     )
@@ -312,7 +313,8 @@ applyTxWithScript lockScripts unlockScripts wdrl aliceKeep signers = utxoSt'
                   (SlotNo 0)
                   initPParams
                   Map.empty
-                  (GenDelegs Map.empty),
+                  (GenDelegs Map.empty)
+                  mempty,
                 utxoSt,
                 tx
               )

@@ -252,7 +252,7 @@ alonzoStyleWitness ::
   ) =>
   TransitionRule (utxow era)
 alonzoStyleWitness = do
-  (TRC (UtxoEnv _slot pp _stakepools _genDelegs, u', tx)) <- judgmentContext
+  (TRC (UtxoEnv _slot pp _stakepools _genDelegs _ptrs, u', tx)) <- judgmentContext
 
   {-  (utxo,_,_,_ ) := utxoSt  -}
   {-  txb := txbody tx  -}

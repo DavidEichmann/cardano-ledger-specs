@@ -138,6 +138,7 @@ lastByronHeaderHash _ = HashHeader $ mkHash 0
 mkGenesisChainState ::
   forall era a.
   ( Default (State (Core.EraRule "PPUP" era)),
+    HasField "address" (Core.TxOut era) (Addr (Crypto era)),
     EraGen era
   ) =>
   GenEnv era ->

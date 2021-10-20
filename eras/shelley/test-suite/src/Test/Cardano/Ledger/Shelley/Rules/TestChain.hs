@@ -24,6 +24,9 @@ module Test.Cardano.Ledger.Shelley.Rules.TestChain
     ledgerTraceFromBlock,
     -- Helper Constraints
     TestingLedger,
+
+    -- Incremental Stake Comp
+    stakeIncrTest,
   )
 where
 
@@ -34,6 +37,7 @@ import Cardano.Ledger.Block
     bheader,
     neededTxInsForBlock,
   )
+import Cardano.Ledger.Address (Addr)
 import Cardano.Ledger.Coin
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Era (Crypto, Era, SupportsSegWit (fromTxSeq))
@@ -44,7 +48,7 @@ import Cardano.Ledger.Shelley.API
     GetLedgerView,
   )
 import Cardano.Ledger.Shelley.Constraints (UsesPParams, UsesValue)
-import Cardano.Ledger.Shelley.EpochBoundary (obligation)
+import Cardano.Ledger.Shelley.EpochBoundary (obligation, Stake (unStake))
 import Cardano.Ledger.Shelley.LedgerState hiding (circulation)
 import Cardano.Ledger.Shelley.Rewards (sumRewards)
 import Cardano.Ledger.Shelley.Rules.Deleg (DelegEnv (..))
@@ -181,6 +185,75 @@ collisionFreeComplete =
         -- tx signatures
         map (requiredMSigSignaturesSubset @era @ledger) ssts
       ]
+
+-- | STAKE INCR
+stakeIncrTest ::
+  forall era ledger.
+  ( EraGen era,
+    TestingLedger era ledger,
+    State (Core.EraRule "PPUP" era) ~ PPUPState era,
+    ChainProperty era,
+    QC.HasTrace (CHAIN era) (GenEnv era)
+  ) =>
+  Property
+stakeIncrTest =
+  forAllChainTrace @era longTraceLen $ \tr -> do
+    let ssts = sourceSignalTargets tr
+
+    conjoin . concat $
+      [ -- preservation properties
+        map (incrStakeComp @era @ledger) ssts
+      ]
+
+incrStakeComp ::
+  forall era ledger.
+  ( ChainProperty era,
+    TestingLedger era ledger
+  ) =>
+  SourceSignalTarget (CHAIN era) ->
+  Property
+incrStakeComp SourceSignalTarget {source = chainSt, signal = block} =
+  conjoin $
+    map checkIncrStakeComp $
+      sourceSignalTargets ledgerTr
+  where
+    (_, ledgerTr) = ledgerTraceFromBlock @era @ledger chainSt block
+    checkIncrStakeComp :: SourceSignalTarget ledger -> Property
+    checkIncrStakeComp
+      SourceSignalTarget
+        { source = (UTxOState {_utxo = u, _stakeDistro = sd}, dp),
+          signal = tx,
+          target = (UTxOState {_utxo = u', _stakeDistro = sd'}, dp')
+        } = counterexample
+              ( mconcat
+                  ( [ "\nDetails:\n"
+                    , "\ntx\n"
+                    , show tx
+                    , "\nsize original utxo\n"
+                    , show (Map.size $ unUTxO u)
+                    , "\noriginal utxo\n"
+                    , show u
+                    , "\noriginal sd\n"
+                    , show sd
+                    , "\nfinal utxo\n"
+                    , show u'
+                    , "\nfinal sd\n"
+                    , show sd'
+                    , "\noriginal ptrs\n"
+                    , show ptrs
+                    , "\nfinal ptrs\n"
+                    , show ptrs'
+                    ]
+                  )
+              )
+              $ counterExampleTooBig u' .||. utxoBal === incrStakeBal
+      where
+        counterExampleTooBig x = Map.size (unUTxO x) > 50
+
+        utxoBal = Val.coin $ balance u'
+        incrStakeBal = fold (unStake sd')
+        ptrs = _ptrs . _dstate $ dp
+        ptrs' = _ptrs . _dstate $ dp'
 
 -- | Various preservation propertiesC
 adaPreservationChain ::
@@ -1117,6 +1190,7 @@ forAllChainTrace ::
   ( Testable prop,
     Default (State (Core.EraRule "PPUP" era)),
     EraGen era,
+    HasField "address" (Core.TxOut era) (Addr (Crypto era)),
     QC.HasTrace (CHAIN era) (GenEnv era)
   ) =>
   Word64 -> -- trace length

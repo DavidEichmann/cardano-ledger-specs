@@ -46,6 +46,7 @@ module Cardano.Ledger.Shelley.LedgerState
     pvCanFollow,
     reapRewards,
     availableAfterMIR,
+    updateStakeDistribution,
 
     -- * Genesis State
     genesisState,
@@ -534,7 +535,8 @@ data UTxOState era = UTxOState
   { _utxo :: !(UTxO era),
     _deposited :: !Coin,
     _fees :: !Coin,
-    _ppups :: !(State (Core.EraRule "PPUP" era))
+    _ppups :: !(State (Core.EraRule "PPUP" era)),
+    _stakeDistro :: !(Stake (Crypto era))
   }
   deriving (Generic)
 
@@ -564,8 +566,8 @@ deriving stock instance
 instance TransUTxOState NoThunks era => NoThunks (UTxOState era)
 
 instance TransUTxOState ToCBOR era => ToCBOR (UTxOState era) where
-  toCBOR (UTxOState ut dp fs us) =
-    encodeListLen 4 <> toCBOR ut <> toCBOR dp <> toCBOR fs <> toCBOR us
+  toCBOR (UTxOState ut dp fs us sd) =
+    encodeListLen 4 <> toCBOR ut <> toCBOR dp <> toCBOR fs <> toCBOR us <> toCBOR sd
 
 instance
   ( TransValue FromCBOR era,
@@ -578,6 +580,7 @@ instance
   fromCBOR =
     decode $
       RecD UTxOState
+        <! From
         <! From
         <! From
         <! From
@@ -710,6 +713,7 @@ genesisState genDelegs0 utxo0 =
         (Coin 0)
         (Coin 0)
         def
+        (Stake mempty)
     )
     (DPState dState def)
   where
@@ -806,6 +810,24 @@ consumed pp u tx =
   where
     refunds = keyRefunds pp tx
     withdrawals = fold . unWdrl $ getField @"wdrls" tx
+
+updateStakeDistribution ::
+  (Era era,
+   HasField "address" (Core.TxOut era) (Addr (Crypto era))
+  ) =>
+  Stake (Crypto era) ->
+  UTxO era ->
+  UTxO era ->
+  Map Ptr (Credential 'Staking (Crypto era)) ->
+  Stake (Crypto era)
+updateStakeDistribution (Stake stake) utxoDel utxoAdd ptrs =
+  Stake $  stake `combine` stakeAdded `combine` stakeDeletedInv
+  where
+    combine = Map.unionWith (<>)
+    stakeDeleted = aggregateUtxoCoinByCredential ptrs utxoDel mempty
+    stakeDeletedInv = Map.map invert stakeDeleted
+    stakeAdded = aggregateUtxoCoinByCredential ptrs utxoAdd mempty
+
 
 newtype WitHashes crypto = WitHashes
   {unWitHashes :: Set (KeyHash 'Witness crypto)}
@@ -1370,7 +1392,7 @@ instance
   Default (State (Core.EraRule "PPUP" era)) =>
   Default (UTxOState era)
   where
-  def = UTxOState (UTxO Map.empty) (Coin 0) (Coin 0) def
+  def = UTxOState (UTxO Map.empty) (Coin 0) (Coin 0) def (Stake mempty)
 
 instance
   (Default (LedgerState era), Default (Core.PParams era)) =>

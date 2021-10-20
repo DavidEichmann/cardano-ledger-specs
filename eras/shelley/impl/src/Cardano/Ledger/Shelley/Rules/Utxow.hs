@@ -260,8 +260,8 @@ initialLedgerStateUTXOW ::
   ) =>
   InitialRule (UTXOW era)
 initialLedgerStateUTXOW = do
-  IRC (UtxoEnv slots pp stakepools genDelegs) <- judgmentContext
-  trans @(Core.EraRule "UTXO" era) $ IRC (UtxoEnv slots pp stakepools genDelegs)
+  IRC (UtxoEnv slots pp stakepools genDelegs stakeDistr) <- judgmentContext
+  trans @(Core.EraRule "UTXO" era) $ IRC (UtxoEnv slots pp stakepools genDelegs stakeDistr)
 
 -- | Function which collects VKey witnesses.
 type CollectVKeyWitnesses era =
@@ -292,7 +292,7 @@ shelleyStyleWitness ::
   (UtxowPredicateFailure era -> PredicateFailure (utxow era)) ->
   TransitionRule (utxow era)
 shelleyStyleWitness collectVKeyWitnesses embed = do
-  (TRC (UtxoEnv slot pp stakepools genDelegs, u, tx)) <- judgmentContext
+  (TRC (UtxoEnv slot pp stakepools genDelegs stakeDistr, u, tx)) <- judgmentContext
 
   {-  (utxo,_,_,_ ) := utxoSt  -}
   {-  txb := txbody tx  -}
@@ -376,7 +376,7 @@ shelleyStyleWitness collectVKeyWitnesses embed = do
     ?! embed (MIRInsufficientGenesisSigsUTXOW genSig)
 
   trans @(Core.EraRule "UTXO" era) $
-    TRC (UtxoEnv slot pp stakepools genDelegs, u, tx)
+    TRC (UtxoEnv slot pp stakepools genDelegs stakeDistr, u, tx)
 
 instance
   ( Era era,

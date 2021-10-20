@@ -652,7 +652,7 @@ totalAdaPotsES (EpochState (AccountState treasury_ reserves_) _ ls _ _ _) =
       feesAdaPot = fees_
     }
   where
-    (UTxOState u deposits fees_ _) = _utxoState ls
+    (UTxOState u deposits fees_ _ _) = _utxoState ls
     (DPState ds _) = _delegationState ls
     rewards_ = fold (Map.elems (_rewards ds))
     coins = Val.coin $ balance u

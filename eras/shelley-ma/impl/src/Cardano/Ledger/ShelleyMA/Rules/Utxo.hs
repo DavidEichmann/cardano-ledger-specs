@@ -248,8 +248,8 @@ utxoTransition ::
   ) =>
   TransitionRule (UTXO era)
 utxoTransition = do
-  TRC (Shelley.UtxoEnv slot pp stakepools genDelegs, u, tx) <- judgmentContext
-  let Shelley.UTxOState utxo deposits' fees ppup = u
+  TRC (Shelley.UtxoEnv slot pp stakepools genDelegs _, u, tx) <- judgmentContext --TODO use stakeDistro
+  let Shelley.UTxOState utxo deposits' fees ppup stake = u
   let txb = getField @"body" tx
 
   inInterval slot (getField @"vldt" txb)
@@ -343,7 +343,8 @@ utxoTransition = do
       { Shelley._utxo = eval ((txins @era txb ⋪ utxo) ∪ txouts txb),
         Shelley._deposited = deposits' <> depositChange,
         Shelley._fees = fees <> getField @"txfee" txb,
-        Shelley._ppups = ppup'
+        Shelley._ppups = ppup',
+        Shelley._stakeDistro = stake -- TODO
       }
 
 --------------------------------------------------------------------------------

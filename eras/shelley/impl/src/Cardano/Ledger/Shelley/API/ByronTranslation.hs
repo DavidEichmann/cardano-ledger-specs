@@ -148,7 +148,8 @@ translateToShelleyLedgerState genesisShelley epochNo cvs =
               { _utxo = utxoShelley,
                 _deposited = Coin 0,
                 _fees = Coin 0,
-                _ppups = def
+                _ppups = def,
+                _stakeDistro = Stake mempty
               },
           _delegationState =
             DPState

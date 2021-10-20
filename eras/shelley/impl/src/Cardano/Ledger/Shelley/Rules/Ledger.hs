@@ -23,6 +23,7 @@ module Cardano.Ledger.Shelley.Rules.Ledger
   )
 where
 
+import Control.SetAlgebra (forwards)
 import Cardano.Binary
   ( FromCBOR (..),
     ToCBOR (..),
@@ -215,11 +216,12 @@ ledgerTransition = do
   let DPState dstate pstate = dpstate
       genDelegs = _genDelegs dstate
       stpools = _pParams pstate
+      ptrs = forwards . _ptrs . _dstate $ dpstate'
 
   utxoSt' <-
     trans @(Core.EraRule "UTXOW" era) $
       TRC
-        ( UtxoEnv slot pp stpools genDelegs,
+        ( UtxoEnv slot pp stpools genDelegs ptrs,
           utxoSt,
           tx
         )

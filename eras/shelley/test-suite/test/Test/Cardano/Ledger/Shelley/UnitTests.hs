@@ -36,6 +36,7 @@ import Cardano.Ledger.Keys
     vKey,
   )
 import Cardano.Ledger.SafeHash (hashAnnotated)
+import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Ledger.Shelley.API
   ( DCert (..),
     LEDGER,
@@ -375,6 +376,7 @@ utxoState =
     (Coin 0)
     (Coin 0)
     def
+    (Stake mempty)
 
 dpState :: DPState C_Crypto
 dpState = DPState def def

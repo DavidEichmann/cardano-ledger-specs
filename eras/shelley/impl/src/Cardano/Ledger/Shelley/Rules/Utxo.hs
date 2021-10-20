@@ -22,6 +22,7 @@ module Cardano.Ledger.Shelley.Rules.Utxo
   )
 where
 
+--import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Binary
   ( FromCBOR (..),
     ToCBOR (..),
@@ -41,6 +42,7 @@ import Cardano.Ledger.BaseTypes
     networkId,
   )
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Credential (Credential)
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Era (Crypto, Era)
 import Cardano.Ledger.Keys (GenDelegs, KeyHash, KeyRole (..))
@@ -66,6 +68,7 @@ import Cardano.Ledger.Shelley.LedgerState
     keyRefunds,
     minfee,
     produced,
+    updateStakeDistribution,
   )
 import Cardano.Ledger.Shelley.PParams (PParams, PParams' (..), Update)
 import Cardano.Ledger.Shelley.Rules.Ppup (PPUP, PPUPEnv (..), PpupEvent, PpupPredicateFailure)
@@ -73,6 +76,7 @@ import Cardano.Ledger.Shelley.Tx (Tx (..), TxIn)
 import Cardano.Ledger.Shelley.TxBody
   ( DCert,
     PoolParams,
+    Ptr,
     RewardAcnt,
     TxBody (..),
     Wdrl (..),
@@ -90,7 +94,7 @@ import Cardano.Ledger.Slot (SlotNo)
 import Cardano.Ledger.Val ((<->))
 import qualified Cardano.Ledger.Val as Val
 import Control.Monad.Trans.Reader (asks)
-import Control.SetAlgebra (dom, eval, (∪), (⊆), (⋪), (➖))
+import Control.SetAlgebra (dom, eval, (∪), (⊆), (◁),(⋪), (➖))
 import Control.State.Transition
   ( Assertion (..),
     AssertionViolation (..),
@@ -126,6 +130,7 @@ data UtxoEnv era
       (Core.PParams era)
       (Map (KeyHash 'StakePool (Crypto era)) (PoolParams (Crypto era)))
       (GenDelegs (Crypto era))
+      (Map Ptr (Credential 'Staking (Crypto era)))
 
 deriving instance Show (Core.PParams era) => Show (UtxoEnv era)
 
@@ -361,8 +366,8 @@ utxoInductive ::
   ) =>
   TransitionRule (utxo era)
 utxoInductive = do
-  TRC (UtxoEnv slot pp stakepools genDelegs, u, tx) <- judgmentContext
-  let UTxOState utxo deposits' fees ppup = u
+  TRC (UtxoEnv slot pp stakepools genDelegs ptrs, u, tx) <- judgmentContext
+  let UTxOState utxo deposits' fees ppup stake = u
   let txb = getField @"body" tx
 
   getField @"ttl" txb >= slot ?! ExpiredUTxO (getField @"ttl" txb) slot
@@ -431,13 +436,18 @@ utxoInductive = do
   let totalDeposits' = totalDeposits pp (`Map.notMember` stakepools) txCerts
   tellEvent $ TotalDeposits totalDeposits'
   let depositChange = totalDeposits' <-> refunded
+  let utxoAdd = txouts txb
+  let utxoDel = eval (txins @era txb ◁ utxo)
+  let newUTxO = eval ((txins @era txb ⋪ utxo) ∪ utxoAdd)
+  let newStakeDistro = updateStakeDistribution @era stake utxoDel utxoAdd ptrs
 
   pure
     UTxOState
-      { _utxo = eval ((txins @era txb ⋪ utxo) ∪ txouts txb),
+      { _utxo = newUTxO,
         _deposited = deposits' <> depositChange,
         _fees = fees <> getField @"txfee" txb,
-        _ppups = ppup'
+        _ppups = ppup',
+        _stakeDistro = newStakeDistro
       }
 
 instance

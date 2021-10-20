@@ -170,8 +170,8 @@ scriptsValidateTransition ::
   TransitionRule (UTXOS era)
 scriptsValidateTransition = do
   TRC
-    ( UtxoEnv slot pp poolParams genDelegs,
-      UTxOState utxo deposited fees pup,
+    ( UtxoEnv slot pp poolParams genDelegs _,
+      UTxOState utxo deposited fees pup stake,
       tx
       ) <-
     judgmentContext
@@ -201,7 +201,8 @@ scriptsValidateTransition = do
       { _utxo = eval ((getField @"inputs" txb ⋪ utxo) ∪ txouts @era txb),
         _deposited = deposited <> depositChange,
         _fees = fees <> getField @"txfee" txb,
-        _ppups = pup'
+        _ppups = pup',
+        _stakeDistro = stake
       }
 
 scriptsNotValidateTransition ::
@@ -228,7 +229,7 @@ scriptsNotValidateTransition ::
   ) =>
   TransitionRule (UTXOS era)
 scriptsNotValidateTransition = do
-  TRC (UtxoEnv _ pp _ _, us@(UTxOState utxo _ fees _), tx) <- judgmentContext
+  TRC (UtxoEnv _ pp _ _ _, us@(UTxOState utxo _ fees _ _), tx) <- judgmentContext
   let txb = body tx
   sysSt <- liftSTS $ asks systemStart
   ei <- liftSTS $ asks epochInfo
@@ -365,7 +366,7 @@ constructValidated ::
   UTxOState era ->
   Core.Tx era ->
   m (ValidatedTx era)
-constructValidated globals (UtxoEnv _ pp _ _) st tx =
+constructValidated globals (UtxoEnv _ pp _ _ _) st tx =
   case collectTwoPhaseScriptInputs ei sysS pp tx utxo of
     Left errs -> throwError [CollectErrors errs]
     Right sLst ->

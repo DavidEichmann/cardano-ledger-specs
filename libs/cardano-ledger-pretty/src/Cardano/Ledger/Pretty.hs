@@ -655,13 +655,14 @@ ppUTxOState ::
   CanPrettyPrintLedgerState era =>
   UTxOState era ->
   PDoc
-ppUTxOState (UTxOState u dep fee ppup) =
+ppUTxOState (UTxOState u dep fee ppup sd) =
   ppRecord
     "UTxOState"
     [ ("utxo", ppUTxO u),
       ("deposited", ppCoin dep),
       ("fees", ppCoin fee),
-      ("ppups", prettyA ppup)
+      ("ppups", prettyA ppup),
+      ("stakeDistro", ppStake sd)
     ]
 
 ppEpochState :: CanPrettyPrintLedgerState era => EpochState era -> PDoc

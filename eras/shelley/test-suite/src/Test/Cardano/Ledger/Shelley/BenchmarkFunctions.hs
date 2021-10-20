@@ -37,6 +37,7 @@ import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Credential (Credential (..))
+import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Ledger.Crypto (Crypto (..))
 import Cardano.Ledger.Keys
   ( Hash,
@@ -154,6 +155,7 @@ initUTxO n =
     (Coin 0)
     (Coin 0)
     def
+    (Stake mempty)
 
 -- Protocal Parameters used for the benchmarknig tests.
 -- Note that the fees and deposits are set to zero for

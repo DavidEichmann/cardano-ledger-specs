@@ -17,6 +17,7 @@ module Cardano.Ledger.Alonzo.Rules.Ledger
   )
 where
 
+import Control.SetAlgebra (forwards)
 import Cardano.Ledger.Alonzo.Rules.Utxow (AlonzoEvent, AlonzoPredFail, AlonzoUTXOW)
 import Cardano.Ledger.Alonzo.Tx (IsValid (..), ValidatedTx (..))
 import Cardano.Ledger.BaseTypes (ShelleyBase)
@@ -97,11 +98,12 @@ ledgerTransition = do
   let DPState dstate pstate = dpstate
       genDelegs = _genDelegs dstate
       stpools = _pParams pstate
+      ptrs = forwards (_ptrs dstate)
 
   utxoSt' <-
     trans @(Core.EraRule "UTXOW" era) $
       TRC
-        ( UtxoEnv @era slot pp stpools genDelegs,
+        ( UtxoEnv @era slot pp stpools genDelegs ptrs,
           utxoSt,
           tx
         )
