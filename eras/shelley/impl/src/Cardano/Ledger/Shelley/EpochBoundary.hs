@@ -65,16 +65,14 @@ import NoThunks.Class (NoThunks (..))
 import Numeric.Natural (Natural)
 
 -- | Type of stake as map from hash key to coins associated.
+
 newtype Stake crypto = Stake
-  { unStake :: Map (Credential 'Staking crypto) Coin
-  }
+  { unStake :: Map (Credential 'Staking crypto) Coin }
   deriving (Show, Eq, Ord, NoThunks, NFData)
 
-deriving newtype instance
-  CC.Crypto crypto => ToCBOR (Stake crypto)
+deriving newtype instance CC.Crypto crypto => ToCBOR (Stake crypto)
 
-deriving newtype instance
-  CC.Crypto crypto => FromCBOR (Stake crypto)
+deriving newtype instance CC.Crypto crypto => FromCBOR (Stake crypto)
 
 -- A TxOut has 4 different shapes, depending on the shape its embedded of Addr.
 -- Credentials are stored in only 2 of the 4 cases.
@@ -117,7 +115,7 @@ poolStake ::
   Stake crypto ->
   Stake crypto
 poolStake hk delegs (Stake stake) =
-  Stake $ eval (dom (delegs ▷ setSingleton hk) ◁ stake)
+  Stake (eval (dom (delegs ▷ setSingleton hk) ◁ stake))
 
 -- | Calculate total possible refunds.
 obligation ::

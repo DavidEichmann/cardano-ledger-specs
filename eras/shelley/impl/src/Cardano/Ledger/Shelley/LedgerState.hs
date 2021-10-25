@@ -41,6 +41,7 @@ module Cardano.Ledger.Shelley.LedgerState
     RewardUpdate (..),
     RewardSnapShot (..),
     UTxOState (..),
+    IncrementalStake(..),
     depositPoolChange,
     emptyRewardUpdate,
     pvCanFollow,
@@ -531,12 +532,33 @@ pvCanFollow _ SNothing = True
 pvCanFollow (ProtVer m n) (SJust (ProtVer m' n')) =
   (m + 1, 0) == (m', n') || (m, n + 1) == (m', n')
 
+-- =============================
+-- | Incremental Stake, Take along with possible missed coins from danging Ptrs
+data IncrementalStake crypto = IStake
+  { getStake :: !(Map (Credential 'Staking crypto) Coin),
+    dangling :: !(Map Ptr Coin)
+  }
+  deriving (Generic, Show, Eq, Ord, NoThunks, NFData)
+
+instance CC.Crypto crypto => ToCBOR (IncrementalStake crypto) where
+  toCBOR (IStake st dangle) =
+     encodeListLen 2 <> mapToCBOR st <> mapToCBOR dangle 
+
+instance CC.Crypto crypto => FromCBOR (IncrementalStake crypto) where
+  fromCBOR = do
+    decodeRecordNamed "Stake" (const 2) $ do
+      stake <- mapFromCBOR
+      dangle <- mapFromCBOR
+      pure $ IStake stake dangle
+-- =============================      
+
+
 data UTxOState era = UTxOState
   { _utxo :: !(UTxO era),
     _deposited :: !Coin,
     _fees :: !Coin,
     _ppups :: !(State (Core.EraRule "PPUP" era)),
-    _stakeDistro :: !(Stake (Crypto era))
+    _stakeDistro :: !(IncrementalStake (Crypto era))
   }
   deriving (Generic)
 
@@ -713,7 +735,7 @@ genesisState genDelegs0 utxo0 =
         (Coin 0)
         (Coin 0)
         def
-        (Stake mempty)
+        (IStake mempty Map.empty)
     )
     (DPState dState def)
   where
@@ -815,13 +837,13 @@ updateStakeDistribution ::
   (Era era,
    HasField "address" (Core.TxOut era) (Addr (Crypto era))
   ) =>
-  Stake (Crypto era) ->
+  IncrementalStake (Crypto era) ->
   UTxO era ->
   UTxO era ->
   Map Ptr (Credential 'Staking (Crypto era)) ->
-  Stake (Crypto era)
-updateStakeDistribution (Stake stake) utxoDel utxoAdd ptrs =
-  Stake $  stake `combine` stakeAdded `combine` stakeDeletedInv
+  IncrementalStake (Crypto era)
+updateStakeDistribution (IStake stake dangle) utxoDel utxoAdd ptrs =
+  IStake (stake `combine` stakeAdded `combine` stakeDeletedInv) dangle
   where
     combine = Map.unionWith (<>)
     stakeDeleted = aggregateUtxoCoinByCredential ptrs utxoDel mempty
@@ -1020,7 +1042,7 @@ stakeDistr ::
   SnapShot (Crypto era)
 stakeDistr u ds ps =
   SnapShot
-    (Stake $ eval (dom activeDelegs ◁ stakeRelation))
+    (Stake (eval (dom activeDelegs ◁ stakeRelation)))
     delegs
     poolParams
   where
@@ -1392,7 +1414,7 @@ instance
   Default (State (Core.EraRule "PPUP" era)) =>
   Default (UTxOState era)
   where
-  def = UTxOState (UTxO Map.empty) (Coin 0) (Coin 0) def (Stake mempty)
+  def = UTxOState (UTxO Map.empty) (Coin 0) (Coin 0) def (IStake mempty Map.empty)
 
 instance
   (Default (LedgerState era), Default (Core.PParams era)) =>

@@ -149,7 +149,7 @@ translateToShelleyLedgerState genesisShelley epochNo cvs =
                 _deposited = Coin 0,
                 _fees = Coin 0,
                 _ppups = def,
-                _stakeDistro = Stake mempty
+                _stakeDistro = IStake mempty Map.empty
               },
           _delegationState =
             DPState

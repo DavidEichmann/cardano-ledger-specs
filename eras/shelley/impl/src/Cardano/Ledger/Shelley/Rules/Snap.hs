@@ -27,6 +27,7 @@ import Cardano.Ledger.Shelley.LedgerState
     PState (..),
     LedgerState (..),
     UTxOState (..),
+    IncrementalStake(..),
     stakeDistr,
   )
 import Control.State.Transition
@@ -63,7 +64,7 @@ snapTransition ::
 snapTransition = do
   TRC (lstate, s, _) <- judgmentContext
 
-  let LedgerState (UTxOState utxo _ fees _ sd) (DPState dstate pstate) = lstate
+  let LedgerState (UTxOState utxo _ fees _ (IStake sd _)) (DPState dstate pstate) = lstate
       stake = stakeDistr utxo dstate pstate
       -- ^ The stake distribution calculation done on the epoch boundary, which we
       -- would like to replace with an incremental one.
@@ -76,7 +77,7 @@ snapTransition = do
       ds' = Map.filter (\pid -> pid `Map.member` ps) ds
 
       -- add the incremental stake distribution calculation to the existing rewards
-      sd' = Map.unionWith (<>) (unStake sd) rws
+      sd' = Map.unionWith (<>) sd rws
 
       -- filter the incremental stake distribution calculation to the credentials which
       -- are both registered and delegating to a registered pool

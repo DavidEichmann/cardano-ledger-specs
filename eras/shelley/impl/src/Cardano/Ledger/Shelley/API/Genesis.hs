@@ -22,11 +22,12 @@ import Cardano.Ledger.Shelley.API.Types
     ShelleyGenesis (sgGenDelegs, sgMaxLovelaceSupply, sgProtocolParams),
     StrictMaybe (SNothing),
     UTxOState (UTxOState),
+    IncrementalStake(..),    
     balance,
     genesisUTxO,
     word64ToCoin,
   )
-import Cardano.Ledger.Shelley.EpochBoundary (Stake (..), emptySnapShots)
+import Cardano.Ledger.Shelley.EpochBoundary (emptySnapShots)
 import Cardano.Ledger.Val (Val ((<->)))
 import Control.State.Transition (STS (State))
 import Data.Default.Class (Default, def)
@@ -67,7 +68,7 @@ instance
                   (Coin 0)
                   (Coin 0)
                   def
-                  (Stake mempty)
+                  (IStake mempty Map.empty)
               )
               (DPState (def {_genDelegs = GenDelegs genDelegs}) def)
           )
