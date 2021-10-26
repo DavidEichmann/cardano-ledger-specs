@@ -48,7 +48,7 @@ import Cardano.Ledger.Shelley.API
     GetLedgerView,
   )
 import Cardano.Ledger.Shelley.Constraints (UsesPParams, UsesValue)
-import Cardano.Ledger.Shelley.EpochBoundary (obligation, Stake (unStake))
+import Cardano.Ledger.Shelley.EpochBoundary (obligation)
 import Cardano.Ledger.Shelley.LedgerState hiding (circulation)
 import Cardano.Ledger.Shelley.Rewards (sumRewards)
 import Cardano.Ledger.Shelley.Rules.Deleg (DelegEnv (..))
@@ -251,7 +251,7 @@ incrStakeComp SourceSignalTarget {source = chainSt, signal = block} =
         counterExampleTooBig x = Map.size (unUTxO x) > 50
 
         utxoBal = Val.coin $ balance u'
-        incrStakeBal = fold (unStake sd')
+        incrStakeBal = fold (getStake sd') <> fold (dangling sd')
         ptrs = _ptrs . _dstate $ dp
         ptrs' = _ptrs . _dstate $ dp'
 

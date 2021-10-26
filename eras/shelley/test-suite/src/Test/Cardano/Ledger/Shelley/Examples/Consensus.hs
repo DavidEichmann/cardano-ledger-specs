@@ -325,7 +325,7 @@ exampleNewEpochState value ppp pp =
                       _deposited = Coin 1000,
                       _fees = Coin 1,
                       _ppups = def,
-                      _stakeDistro = Stake mempty
+                      _stakeDistro = IStake mempty mempty
                     },
                 _delegationState = def
               },

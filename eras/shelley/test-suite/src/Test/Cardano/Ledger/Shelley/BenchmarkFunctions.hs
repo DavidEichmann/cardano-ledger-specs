@@ -37,7 +37,6 @@ import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Credential (Credential (..))
-import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Ledger.Crypto (Crypto (..))
 import Cardano.Ledger.Keys
   ( Hash,
@@ -58,6 +57,7 @@ import Cardano.Ledger.Shelley.LedgerState
   ( AccountState (..),
     DPState,
     UTxOState (..),
+    IncrementalStake(..),
   )
 import Cardano.Ledger.Shelley.PParams (PParams, PParams' (..), emptyPParams)
 import Cardano.Ledger.Shelley.Rules.Ledger (LEDGER, LedgerEnv (..))
@@ -155,7 +155,7 @@ initUTxO n =
     (Coin 0)
     (Coin 0)
     def
-    (Stake mempty)
+    (IStake mempty mempty)
 
 -- Protocal Parameters used for the benchmarknig tests.
 -- Note that the fees and deposits are set to zero for

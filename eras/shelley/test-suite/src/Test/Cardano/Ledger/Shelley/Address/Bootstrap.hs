@@ -46,10 +46,10 @@ import Cardano.Ledger.Keys
 import Cardano.Ledger.SafeHash (extractHash, hashAnnotated)
 import Cardano.Ledger.Shelley (ShelleyEra)
 import Cardano.Ledger.Shelley.Address.Bootstrap
-import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Ledger.Shelley.LedgerState
   ( PPUPState (..),
     UTxOState (..),
+    IncrementalStake(..),
   )
 import Cardano.Ledger.Shelley.PParams
   ( PParams' (..),
@@ -158,7 +158,7 @@ utxoState0 =
       _deposited = Coin 0,
       _fees = Coin 0,
       _ppups = PPUPState (ProposedPPUpdates mempty) (ProposedPPUpdates mempty),
-      _stakeDistro = Stake mempty
+      _stakeDistro = IStake mempty mempty
     }
 
 tx :: Tx C
@@ -174,7 +174,7 @@ utxoState1 =
       _deposited = Coin 0,
       _fees = Coin 10,
       _ppups = PPUPState (ProposedPPUpdates mempty) (ProposedPPUpdates mempty),
-      _stakeDistro = Stake mempty
+      _stakeDistro = IStake mempty mempty
     }
   where
     txid = TxId $ hashAnnotated txBody

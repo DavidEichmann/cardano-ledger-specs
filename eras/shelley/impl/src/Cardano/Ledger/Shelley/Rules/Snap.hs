@@ -94,17 +94,21 @@ snapTransition = do
       -- if there were no rewards
       bigAggNoRewards = aggregateUtxoCoinByCredential (forwards . _ptrs $ dstate) utxo mempty
 
-      doExplode = False
+      doExplode = True
 
       msg = [ "\nBOOM!\n"
-            , "snapshotted stake\n"
-            , show (_stake stake)
+            , "\nsnapshotted stake\n"
+            , unlines (map show (Map.toList (unStake(_stake stake))))
             , "\nincremental stake (filtered & w/ rewards)\n"
-            , show sd3
+            , unlines (map show (Map.toList (unStake sd3)))
             , "\nagged in spot\n"
-            , show bigAggNoRewards
+            , unlines (map show (Map.toList bigAggNoRewards))
             , "\nrewards\n"
-            , show rws
+            , unlines (map show (Map.toList rws))
+            , "\n PTRS\n"
+            , unlines (map show (Map.toList (forwards (_ptrs dstate))))
+            , "\n DANGLING\n"
+            , unlines (map show (Map.toList dangle))
             ]
       newMarkSnapshot =
         if doExplode && (_stake stake) /= sd3

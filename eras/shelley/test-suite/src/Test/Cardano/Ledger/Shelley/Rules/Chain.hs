@@ -55,7 +55,7 @@ import Cardano.Ledger.Shelley.API.Wallet
     totalAdaPotsES,
   )
 import Cardano.Ledger.Shelley.Constraints (UsesValue)
-import Cardano.Ledger.Shelley.EpochBoundary (aggregateUtxoCoinByCredential, emptySnapShots,  Stake (..))
+import Cardano.Ledger.Shelley.EpochBoundary (aggregateUtxoCoinByCredential, emptySnapShots)
 import Cardano.Ledger.Shelley.LedgerState
   ( AccountState (..),
     DPState (..),
@@ -66,6 +66,7 @@ import Cardano.Ledger.Shelley.LedgerState
     PState (..),
     TransUTxOState,
     UTxOState (..),
+    IncrementalStake(..),
     updateNES,
     _genDelegs,
   )
@@ -206,7 +207,7 @@ initialShelleyState lab e utxo reserves genDelegs pp initNonce =
                     (Coin 0)
                     (Coin 0)
                     def
-                    (Stake $ aggregateUtxoCoinByCredential mempty utxo mempty)
+                    (IStake (aggregateUtxoCoinByCredential mempty utxo mempty) mempty)
                 )
                 (DPState (def {_genDelegs = GenDelegs genDelegs}) def)
             )

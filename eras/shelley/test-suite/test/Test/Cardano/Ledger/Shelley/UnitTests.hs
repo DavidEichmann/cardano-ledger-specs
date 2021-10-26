@@ -36,7 +36,6 @@ import Cardano.Ledger.Keys
     vKey,
   )
 import Cardano.Ledger.SafeHash (hashAnnotated)
-import Cardano.Ledger.Shelley.EpochBoundary (Stake (..))
 import Cardano.Ledger.Shelley.API
   ( DCert (..),
     LEDGER,
@@ -47,6 +46,7 @@ import Cardano.Ledger.Shelley.LedgerState
   ( AccountState (..),
     DPState (..),
     UTxOState (..),
+    IncrementalStake(..),
     WitHashes (..),
     _dstate,
     _rewards,
@@ -376,7 +376,7 @@ utxoState =
     (Coin 0)
     (Coin 0)
     def
-    (Stake mempty)
+    (IStake mempty mempty)
 
 dpState :: DPState C_Crypto
 dpState = DPState def def

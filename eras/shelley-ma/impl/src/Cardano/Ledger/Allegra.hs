@@ -64,7 +64,7 @@ instance
                   (Coin 0)
                   (Coin 0)
                   def
-                  (Stake mempty)
+                  (IStake mempty mempty)
               )
               (DPState (def {_genDelegs = GenDelegs genDelegs}) def)
           )
