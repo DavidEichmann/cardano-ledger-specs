@@ -64,7 +64,7 @@ snapTransition ::
 snapTransition = do
   TRC (lstate, s, _) <- judgmentContext
 
-  let LedgerState (UTxOState utxo _ fees _ (IStake sd _)) (DPState dstate pstate) = lstate
+  let LedgerState (UTxOState utxo _ fees _ (IStake sd dangle)) (DPState dstate pstate) = lstate
       stake = stakeDistr utxo dstate pstate
       -- ^ The stake distribution calculation done on the epoch boundary, which we
       -- would like to replace with an incremental one.
@@ -76,12 +76,19 @@ snapTransition = do
       -- filter the delegation mapping by the registered stake pools
       ds' = Map.filter (\pid -> pid `Map.member` ps) ds
 
-      -- add the incremental stake distribution calculation to the existing rewards
-      sd' = Map.unionWith (<>) sd rws
+      -- check if dangling ptrs are no-longer dangling, so we adjust by adding them back to 'sd'
+      ptrs = forwards (_ptrs dstate)
+      sd1 = Map.foldlWithKey' accum sd dangle
+             where accum incstake p coin = 
+                      case Map.lookup p ptrs of
+                         Just cred -> Map.insertWith (<>) cred coin incstake
+                         Nothing -> incstake
+      -- add the incremental stake distribution calculation to the existing rewards                         
+      sd2 = Map.unionWith (<>) sd1 rws
 
       -- filter the incremental stake distribution calculation to the credentials which
       -- are both registered and delegating to a registered pool
-      sd'' = Stake $ Map.filterWithKey (\cred _ -> cred `Map.member` ds') sd'
+      sd3 = Stake $ Map.filterWithKey (\cred _ -> cred `Map.member` ds') sd2
 
       -- for debugging, this is what the epoch boundary calculation would look like
       -- if there were no rewards
@@ -93,14 +100,14 @@ snapTransition = do
             , "snapshotted stake\n"
             , show (_stake stake)
             , "\nincremental stake (filtered & w/ rewards)\n"
-            , show sd''
+            , show sd3
             , "\nagged in spot\n"
             , show bigAggNoRewards
             , "\nrewards\n"
             , show rws
             ]
       newMarkSnapshot =
-        if doExplode && (_stake stake) /= sd''
+        if doExplode && (_stake stake) /= sd3
           then (error $ mconcat msg)
           else stake
   pure $

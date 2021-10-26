@@ -367,7 +367,7 @@ utxoInductive ::
   TransitionRule (utxo era)
 utxoInductive = do
   TRC (UtxoEnv slot pp stakepools genDelegs ptrs, u, tx) <- judgmentContext
-  let UTxOState utxo deposits' fees ppup stake = u
+  let UTxOState utxo deposits' fees ppup incStake = u
   let txb = getField @"body" tx
 
   getField @"ttl" txb >= slot ?! ExpiredUTxO (getField @"ttl" txb) slot
@@ -436,10 +436,10 @@ utxoInductive = do
   let totalDeposits' = totalDeposits pp (`Map.notMember` stakepools) txCerts
   tellEvent $ TotalDeposits totalDeposits'
   let depositChange = totalDeposits' <-> refunded
-  let utxoAdd = txouts txb
-  let utxoDel = eval (txins @era txb ◁ utxo)
-  let newUTxO = eval ((txins @era txb ⋪ utxo) ∪ utxoAdd)
-  let newStakeDistro = updateStakeDistribution @era stake utxoDel utxoAdd ptrs
+  let utxoAdd = txouts txb                                 -- These will be inserted into the UTxO
+  let utxoDel = eval (txins @era txb ◁ utxo)              -- These will be deleted fromthe UTxO
+  let newUTxO = eval ((txins @era txb ⋪ utxo) ∪ utxoAdd)  -- Domain exclusion (a ⋪ b) deletes 'a' from 'b'
+  let newIncStakeDistro = updateStakeDistribution @era incStake utxoDel utxoAdd ptrs
 
   pure
     UTxOState
@@ -447,7 +447,7 @@ utxoInductive = do
         _deposited = deposits' <> depositChange,
         _fees = fees <> getField @"txfee" txb,
         _ppups = ppup',
-        _stakeDistro = newStakeDistro
+        _stakeDistro = newIncStakeDistro
       }
 
 instance

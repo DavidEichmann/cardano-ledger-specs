@@ -15,6 +15,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE BangPatterns #-}
 
 -- |
 -- Module      : LedgerState
@@ -125,7 +126,7 @@ import Cardano.Ledger.Coin
 import Cardano.Ledger.Compactible
 import Cardano.Ledger.Core (PParamsDelta)
 import qualified Cardano.Ledger.Core as Core
-import Cardano.Ledger.Credential (Credential (..))
+import Cardano.Ledger.Credential (Credential (..),StakeReference(StakeRefPtr,StakeRefBase))
 import qualified Cardano.Ledger.Crypto as CC (Crypto)
 import Cardano.Ledger.Era (Crypto, Era)
 import Cardano.Ledger.Keys
@@ -237,7 +238,7 @@ import Data.Coders
 import Data.Constraint (Constraint)
 import Data.Default.Class (Default, def)
 import Data.Foldable (fold, toList)
-import Data.Group (invert)
+import Data.Group (Group,invert)
 import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -533,7 +534,7 @@ pvCanFollow (ProtVer m n) (SJust (ProtVer m' n')) =
   (m + 1, 0) == (m', n') || (m, n + 1) == (m', n')
 
 -- =============================
--- | Incremental Stake, Take along with possible missed coins from danging Ptrs
+-- | Incremental Stake, Stake along with possible missed coins from danging Ptrs
 data IncrementalStake crypto = IStake
   { getStake :: !(Map (Credential 'Staking crypto) Coin),
     dangling :: !(Map Ptr Coin)
@@ -550,6 +551,16 @@ instance CC.Crypto crypto => FromCBOR (IncrementalStake crypto) where
       stake <- mapFromCBOR
       dangle <- mapFromCBOR
       pure $ IStake stake dangle
+
+instance Semigroup (IncrementalStake c)
+  where (IStake a b) <> (IStake c d) = IStake (Map.unionWith (<>) a c) (Map.unionWith (<>) b d)
+
+instance Monoid (IncrementalStake c)
+  where mempty = (IStake Map.empty Map.empty)
+
+instance Data.Group.Group (IncrementalStake c) where
+  invert (IStake m1 m2) = IStake (Map.map invert m1) (Map.map invert m2)
+
 -- =============================      
 
 
@@ -833,6 +844,8 @@ consumed pp u tx =
     refunds = keyRefunds pp tx
     withdrawals = fold . unWdrl $ getField @"wdrls" tx
 
+
+-- | Incrementally add the inserts 'utxoAdd' and the deletes 'utxoDel' to the IncrementalStake.
 updateStakeDistribution ::
   (Era era,
    HasField "address" (Core.TxOut era) (Addr (Crypto era))
@@ -842,13 +855,36 @@ updateStakeDistribution ::
   UTxO era ->
   Map Ptr (Credential 'Staking (Crypto era)) ->
   IncrementalStake (Crypto era)
-updateStakeDistribution (IStake stake dangle) utxoDel utxoAdd ptrs =
-  IStake (stake `combine` stakeAdded `combine` stakeDeletedInv) dangle
+updateStakeDistribution incStake utxoDel utxoAdd ptrs = finalStake
   where
-    combine = Map.unionWith (<>)
-    stakeDeleted = aggregateUtxoCoinByCredential ptrs utxoDel mempty
-    stakeDeletedInv = Map.map invert stakeDeleted
-    stakeAdded = aggregateUtxoCoinByCredential ptrs utxoAdd mempty
+    addStake = incrementalAggregateUtxoCoinByCredential ptrs utxoAdd incStake
+    delStake = incrementalAggregateUtxoCoinByCredential ptrs utxoDel mempty
+    finalStake = addStake <> (invert delStake)
+
+-- | Incrementally sum up all the Coin for each staking Credential
+incrementalAggregateUtxoCoinByCredential ::
+  forall era.
+  ( Era era,
+    HasField "address" (Core.TxOut era) (Addr (Crypto era))
+  ) =>
+  Map Ptr (Credential 'Staking (Crypto era)) ->
+  UTxO era ->
+  IncrementalStake (Crypto era) ->
+  IncrementalStake (Crypto era)
+incrementalAggregateUtxoCoinByCredential ptrs (UTxO u) initial =
+  Map.foldl' accum initial u
+  where
+    accum ans@(!(IStake stake dangle)) out =
+      case (getField @"address" out, getField @"value" out) of
+        (Addr _ _ (StakeRefPtr p), c) ->
+          case Map.lookup p ptrs of
+            Just cred -> IStake (Map.insertWith (<>) cred (Val.coin c) stake) dangle
+            Nothing -> IStake stake (Map.insertWith (<>) p (Val.coin c) dangle)
+        (Addr _ _ (StakeRefBase hk), c) ->
+            IStake (Map.insertWith (<>) hk (Val.coin c) stake) dangle
+        _other -> ans
+
+
 
 
 newtype WitHashes crypto = WitHashes
