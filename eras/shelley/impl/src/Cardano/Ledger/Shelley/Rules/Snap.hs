@@ -97,10 +97,12 @@ snapTransition = do
       doExplode = True
 
       msg = [ "\nBOOM!\n"
-            , "\nsnapshotted stake\n"
-            , unlines (map show (Map.toList (unStake(_stake stake))))
-            , "\nincremental stake (filtered & w/ rewards)\n"
-            , unlines (map show (Map.toList (unStake sd3)))
+            , "\n Differences\n"
+            , unlines (map show (differences  (Map.toList (unStake(_stake stake)))  (Map.toList (unStake sd3))))
+            -- , "\nsnapshotted stake\n"
+            -- , unlines (map show (Map.toList (unStake(_stake stake))))
+            -- , "\nincremental stake (filtered & w/ rewards)\n"
+            -- , unlines (map show (Map.toList (unStake sd3)))
             , "\nagged in spot\n"
             , unlines (map show (Map.toList bigAggNoRewards))
             , "\nrewards\n"
@@ -121,3 +123,18 @@ snapTransition = do
         _pstakeGo = _pstakeSet s,
         _feeSS = fees
       }
+
+
+data Case a b = OnLeft (a,b) | OnRight (a,b) | SameKey (a,b,b)
+  deriving Show
+
+-- | we assume the lists are lexigraphically sorted
+differences :: (Ord a,Eq b) => [(a,b)] -> [(a,b)] -> [Case a b]
+differences [] [] = []
+differences xs [] = (map OnLeft xs)
+differences [] ys = (map OnRight ys)
+differences ((a1,b1):xs) ((a2,b2):ys) =
+  case compare a1 a2 of
+    EQ -> if b1==b2 then differences xs ys else (SameKey (a1,b1,b2)):differences xs ys
+    LT -> (OnLeft (a1,b1)) : differences xs  ((a2,b2):ys)
+    GT -> (OnRight (a2,b2)) : differences ((a1,b1):xs) ys
