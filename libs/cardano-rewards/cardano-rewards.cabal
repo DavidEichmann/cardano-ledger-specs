@@ -1,0 +1,33 @@
+cabal-version: 2.2
+
+name:                cardano-rewards
+version:             0.1.0.0
+license:             Apache-2.0
+author:              IOHK Formal Methods Team
+maintainer:          formal.methods@iohk.io
+description:         A standalone implementation of the Cardano rewards
+build-type:          Simple
+
+extra-source-files:
+
+source-repository head
+  type: git
+  location: https://github.com/input-output-hk/cardano-ledger-specs.git
+  subdir:   libs/cardano-rewards
+
+common project-config
+  default-language:   Haskell2010
+  build-depends:      base >= 4.12 && < 4.15
+
+  ghc-options:        -Wall
+                      -Wcompat
+                      -Wincomplete-record-updates
+                      -Wincomplete-uni-patterns
+                      -Wredundant-constraints
+                      -Wunused-packages
+
+library
+  import:             project-config
+  build-depends:      bytestring
+  exposed-modules:    Cardano.Rewards
+  hs-source-dirs:     src

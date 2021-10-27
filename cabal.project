@@ -17,6 +17,7 @@ packages:
   libs/cardano-ledger-example-shelley
   libs/cardano-ledger-pretty
   libs/cardano-ledger-test
+  libs/cardano-rewards
   libs/cardano-protocol-tpraos
   libs/plutus-preprocessor
   libs/ledger-state
@@ -169,6 +170,9 @@ package cardano-ledger-pretty
   ghc-options: -Werror
 
 package cardano-ledger-test
+  ghc-options: -Werror
+
+package cardano-rewards
   ghc-options: -Werror
 
 package cardano-protocol-tpraos
