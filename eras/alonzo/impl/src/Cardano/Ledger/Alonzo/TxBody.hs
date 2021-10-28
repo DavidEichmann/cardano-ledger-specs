@@ -2,8 +2,10 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -12,9 +14,12 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-redundant-constraints #-} -- For `getIxWord`
 
 module Cardano.Ledger.Alonzo.TxBody
   ( TxOut (TxOut, TxOutCompact, TxOutCompactDH),
@@ -53,6 +58,27 @@ module Cardano.Ledger.Alonzo.TxBody
 
     -- * deprecated
     WitnessPPDataHash,
+
+    -- MaxValueForBitLen,
+    BitsToWords,
+    PackedBitsLen(..),
+    PackedBits(..),
+    -- PackedBitsBuilder,
+    getIxWord,
+    getWord32,
+    getWord64,
+    getBool,
+    getIntegral,
+    setIxWord,
+    setWord32,
+    setWord64,
+    setBool,
+    setIntegral,
+    -- padding,
+    -- packWord32,
+    -- packWord64,
+    -- packBool,
+    -- append
   )
 where
 
@@ -116,11 +142,29 @@ import GHC.Records (HasField (..))
 import GHC.Stack (HasCallStack)
 import NoThunks.Class (InspectHeapNamed (..), NoThunks)
 import Prelude hiding (lookup)
+import Data.Word
+import GHC.TypeLits
+import Data.Kind
+import Data.Proxy
+import Data.Bits
 
+-- Map is 42%
+-- TxOut is 21% of the live heap
 data TxOut era
   = TxOutCompact
-      {-# UNPACK #-} !(CompactAddr (Crypto era))
-      !(CompactForm (Core.Value era))
+      {-# UNPACK #-} !(CompactAddr (Crypto era))  -- data ShortByteString = SBS ByteArray# (3 Words + Payload)
+        -- Hash (Core.ADDRHASH (Crypto Alonzo)) a   is 28 bytes = 3.5 words
+        -- (28 * 2) + 1 = 57 bytes = 7.125 -> 8 words
+        --
+        -- 11 Words
+      !(CompactForm (Core.Value era))             -- 3 Words (in the CompactValueAdaOnly case)
+
+      -- 11 + 3 + 1 = 15   (adaOnly and shelley address)
+
+      -- 1 word + 3.5 word + 1 word + 1bit + 1bit   + 1 word
+      --  stake    pay cred    ada     T/M    S/P      info table
+      -- 1 word + 5 words + 1 word
+      -- 7 words
   | TxOutCompactDH
       {-# UNPACK #-} !(CompactAddr (Crypto era))
       !(CompactForm (Core.Value era))
@@ -678,3 +722,378 @@ instance (Core.Value era ~ val, Compactible val) => HasField "value" (TxOut era)
 instance c ~ Crypto era => HasField "datahash" (TxOut era) (StrictMaybe (DataHash c)) where
   getField (TxOutCompact _ _) = SNothing
   getField (TxOutCompactDH _ _ d) = SJust d
+
+--
+-- Bit fields
+--
+
+type a < b = (b <=? a) ~ 'False
+
+-- | Write the integer to the given range.
+setIntegral
+  :: forall
+     int -- Some Integral type. It's assumed that @fromIntegral@ to Word64 will project out the lowest 64 bits
+     loInc -- The start index (inclusive) in the packed bits to write to.
+     hiExc -- The end   index (exclusive) in the packed bits to write to.
+     n
+  .  ( KnownNat loInc
+     , KnownNat hiExc
+     , KnownNat n
+     , loInc < hiExc
+     , hiExc <= n
+     , Integral int
+     , Bits int
+     , PackedBitsLen n
+     )
+  => Proxy loInc
+  -> Proxy hiExc
+  -> int
+  -- ^ The bits to write. The (hiExc - loInc) lowest bits are written
+  -> PackedBits n
+  -> PackedBits n
+setIntegral pLoInc pHiExc = unsafeSetIntegral (fromIntegral $ natVal pLoInc) (fromIntegral $ natVal pHiExc)
+
+-- | Write the integer to the given range.
+unsafeSetIntegral
+  :: forall
+     int -- Some Integral type. It's assumed that @fromIntegral@ to Word64 will project out the lowest 64 bits
+     n
+  .  ( KnownNat n
+     , Integral int
+     , Bits int
+     , PackedBitsLen n
+     )
+  => Int -- ^ The start index (inclusive) in the packed bits to write to.
+  -> Int -- ^ The end   index (exclusive) in the packed bits to write to.
+  -> int
+  -- ^ The bits to write. The (hiExc - loInc) lowest bits are written
+  -> PackedBits n
+  -> PackedBits n
+unsafeSetIntegral loInc hiExc topBits packedbits
+  | not (loInc < hiExc && hiExc < nTop) = error $
+      "expected (loInc < hiExc && hiExc < n) but got (loInc, hiExc, n) = "
+      ++ show (loInc, hiExc, nTop)
+  | otherwise = go packedbits hiInc bitLen topBits
+  where
+    hiInc = hiExc - 1
+    nTop = fromIntegral (natVal (Proxy @n))
+    bitLen = hiExc - loInc
+
+    go :: PackedBits n -- Current packed value
+       -> Int -- Current bit index (starts from the right and moves left)
+       -> Int -- number of bits remaining to be written
+       -> int -- bit values remaining to be written (right aligned)
+       -> PackedBits n
+    go val _ 0 _ = val
+    go val bitIx n bits = if bitIx `mod` 64 == 63
+      -- Current bit index is at the end of a word
+      then if n >= 64
+        -- Write the whole word
+        then go (setWord64IxUnsafe wordIx (fromIntegral bits) val) (bitIx + 64) (n - 64) (bits `shiftR` 64)
+        -- Write only the right part of the bits and stop
+        else let
+          rightMask = (1 `shiftL` n) - 1
+          leftMask = complement rightMask
+          in setWord64IxUnsafe wordIx ((currWord .&. leftMask) .|. (fromIntegral bits .&. rightMask)) val
+      -- Current bit index is not at the end of a word. Write to the left of
+      -- the current word and continue.
+      else let
+        leftBitLen = bitIx `mod` 64
+        rightBitLen = 64 - leftBitLen
+        rightMask = (1 `shiftL` rightBitLen) - 1
+        rightAlignedLeftMask = (1 `shiftL` leftBitLen) - 1
+        leftMask = complement rightMask
+        leftAlignedCurrWordChunk = (fromIntegral currWord .&. rightAlignedLeftMask) `shiftL` rightBitLen
+        in setWord64IxUnsafe wordIx ((currWord .&. rightMask) .|. (leftAlignedCurrWordChunk .&. leftMask)) val
+      where
+        wordIx = bitIx `div` 64
+        currWord = getWord64IxUnsafe wordIx val
+
+-- | Get the Integer at the given bit index.
+getIntegral :: forall
+     int -- Some Integral type to read.
+     loInc -- The start index (inclusive) in the packed bits to read.
+     hiExc -- The end   index (exclusive) in the packed bits to read.
+     n
+  .  ( KnownNat loInc
+     , KnownNat hiExc
+     , KnownNat n
+     , loInc < hiExc
+     , hiExc <= n
+     , Integral int
+     , Bits int
+     , PackedBitsLen n
+     )
+  => Proxy loInc
+  -> Proxy hiExc
+  -> PackedBits n
+  -> int
+getIntegral pLoInc pHiExc = unsafeGetIntegral (fromIntegral $ natVal pLoInc) (fromIntegral $ natVal pHiExc)
+
+-- | Get the Integer at the given bit index.
+unsafeGetIntegral :: forall
+     int -- Some Integral type to read.
+     n
+  .  ( KnownNat n
+     , Integral int
+     , Bits int
+     , PackedBitsLen n
+     )
+  => Int -- ^ The start index (inclusive) in the packed bits to read.
+  -> Int -- ^ The end   index (exclusive) in the packed bits to read.
+  -> PackedBits n
+  -> int
+unsafeGetIntegral loInc hiExc packedbits
+  | not (loInc < hiExc && hiExc <= nTop) = error $
+      "expected (loInc < hiExc && hiExc < n) but got (loInc, hiExc, n) = "
+      ++ show (loInc, hiExc, nTop)
+  | otherwise = go 0 loInc bitLen
+  where
+    nTop = fromIntegral (natVal (Proxy @n))
+    bitLen = hiExc - loInc
+
+    go :: int -- Accumulated bits
+       -> Int -- Current bit index
+       -> Int -- number of bits remaining to be read
+       -> int
+    go val _ 0 = val
+    go val ix n = if ix `mod` 64 == 0
+      -- Current bit index is at the start of a word
+      then if n >= 64
+        -- Consume the whole word
+        then go (val `shiftL` 64 + fromIntegral currentWord) (ix + 64) (n - 64)
+        -- Consume only the left part of the word and stop
+        else let
+          mask :: Word64
+          mask = (1 `shiftL` n) - 1 -- Note shiftL will not overflow (1 <= n <= 63)
+          rest = currentWord `shiftR` (64 - n) .&. mask
+          in (val `shiftL` n) + fromIntegral rest
+      -- Current bit index is not at the start of a word. Consume the right of
+      -- the word and continue.
+      else let
+        consumeBitLen = 64 - (ix `mod` 64) -- 1 <= restBitLen <= 63
+        consumeMask :: Word64
+        consumeMask = (1 `shiftL` consumeBitLen) - 1
+        in go ((val `shiftL` consumeBitLen) + (fromIntegral (currentWord .&. consumeMask)))
+              (ix + consumeBitLen)
+              (n - consumeBitLen)
+      where
+        currentWord = getWord64IxUnsafe (ix `div` 64) packedbits
+
+-- setWord64 :: (KnownNat pos, pos <= n - 64) => Proxy pos -> Word64 -> PackedBits n ->  PackedBits n
+-- setWord64 w64 = BEnd (Proxy @64) w64
+
+-- packWord32 :: Word64 -> PackedBitsBuilder 32
+-- packWord32 w32 = BEnd (Proxy @32) (fromIntegral w32 `shiftL` 32)
+
+-- packBool :: Bool -> PackedBitsBuilder 1
+-- packBool b = if b
+--   then packNat (Proxy @1) (Proxy @1)
+--   else packNat (Proxy @0) (Proxy @1)
+
+--
+-- Type level helpers
+--
+
+-- | Words required to store bitLen bits (ceil (bitLen / 64)).
+type family BitsToWords (bitLen :: Nat) :: Nat where
+  BitsToWords 0 = 0
+  BitsToWords bitLen = (Div (bitLen - 1) 64) + 1 -- Note that Div rounds down
+
+--
+-- Backing datatypes using unpacked Word64s
+--
+
+class PackedBitsLen (bitLen :: Nat) where
+  data PackedBits bitLen :: Type
+  -- | Get the Word64 a the given index. Does not perform a bounds check.
+  getWord64IxUnsafe :: Int -> PackedBits bitLen -> Word64
+  -- | Set the Word64 a the given index. Does not perform a bounds check.
+  setWord64IxUnsafe :: Int -> Word64 -> PackedBits bitLen -> PackedBits bitLen
+  -- | All bits set to 0.
+  packedBitsZero :: Proxy bitLen -> PackedBits bitLen
+
+-- | Get the Word64 a the given word index.
+getIxWord :: forall i n. (i <= ((BitsToWords n) + 1), PackedBitsLen n, KnownNat i)
+  => Proxy i -> PackedBits n -> Word64
+getIxWord _ = getWord64IxUnsafe (fromIntegral $ natVal (Proxy @i))
+
+-- | Get the Word64 a the given word index.
+setIxWord :: forall i n. (i <= ((BitsToWords n) + 1), PackedBitsLen n, KnownNat i)
+  => Proxy i -> Word64 -> PackedBits n -> PackedBits n
+setIxWord _ = setWord64IxUnsafe (fromIntegral $ natVal (Proxy @i))
+
+-- | Get the Word64 at the given bit index.
+getWord64 :: forall i n.
+  ( (i + 64) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> PackedBits n -> Word64
+getWord64 pBitIndex = unsafeGetIntegral bitIndex (bitIndex + 64)
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+-- | Set the Word64 at the given bit index.
+setWord64 :: forall i n.
+  ( (i + 64) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> Word64 -> PackedBits n -> PackedBits n
+setWord64 pBitIndex = unsafeSetIntegral bitIndex (bitIndex + 64)
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+-- | Get the Word32 at the given bit index.
+getWord32 :: forall i n.
+  ( (i + 32) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> PackedBits n -> Word32
+getWord32 pBitIndex = unsafeGetIntegral bitIndex (bitIndex + 32)
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+-- | Set the Word32 at the given bit index.
+setWord32 :: forall i n.
+  ( (i + 32) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> Word32 -> PackedBits n -> PackedBits n
+setWord32 pBitIndex = unsafeSetIntegral bitIndex (bitIndex + 32)
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+-- | Get the Word32 at the given bit index.
+getBool :: forall i n.
+  ( (i + 1) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> PackedBits n -> Bool
+getBool pBitIndex packedbits = (1 :: Int) == (unsafeGetIntegral bitIndex (bitIndex + 1) packedbits)
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+-- | Set the Word32 at the given bit index.
+setBool :: forall i n.
+  ( (i + 1) <= n
+  , PackedBitsLen n
+  , KnownNat i
+  , KnownNat n
+  ) => Proxy i -> Bool -> PackedBits n -> PackedBits n
+setBool pBitIndex b packedbits = unsafeSetIntegral bitIndex (bitIndex + 1) (if b then 1 else 0 :: Int) packedbits
+  where
+    bitIndex = fromIntegral $ natVal pBitIndex
+
+boundError :: forall a b. KnownNat a => Proxy a -> Int -> b
+boundError _ bound = error $ "getIxWord: index " ++ show bound ++ " is out of bounds [0-" ++ show (natVal (Proxy @a)) ++ "]"
+
+instance PackedBitsLen 64 where
+  newtype PackedBits 64 = PackedBits64 Word64
+    deriving (Show)
+
+  packedBitsZero _ = PackedBits64 0
+
+  getWord64IxUnsafe i (PackedBits64 a) = case i of
+    0 -> a
+    _ -> boundError (Proxy @64) i
+
+  setWord64IxUnsafe i v (PackedBits64 _) = case i of
+    0 -> PackedBits64 v
+    _ -> boundError (Proxy @64) i
+
+instance PackedBitsLen 128 where
+  data PackedBits 128 = PackedBits128
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    deriving (Show)
+
+  packedBitsZero _ = PackedBits128 0 0
+
+  getWord64IxUnsafe i (PackedBits128 a b) = case i of
+    0 -> a
+    1 -> b
+    _ -> boundError (Proxy @128) i
+
+  setWord64IxUnsafe i v (PackedBits128 a b) = case i of
+    0 -> PackedBits128 v b
+    1 -> PackedBits128 a v
+    _ -> boundError (Proxy @128) i
+
+instance PackedBitsLen 192 where
+  data PackedBits 192 = PackedBits192
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    deriving (Show)
+
+  packedBitsZero _ = PackedBits192 0 0 0
+
+  getWord64IxUnsafe i (PackedBits192 a b c) = case i of
+    0 -> a
+    1 -> b
+    2 -> c
+    _ -> boundError (Proxy @192) i
+
+  setWord64IxUnsafe i v (PackedBits192 a b c) = case i of
+    0 -> PackedBits192 v b c
+    1 -> PackedBits192 a v c
+    2 -> PackedBits192 a b v
+    _ -> boundError (Proxy @192) i
+
+instance PackedBitsLen 256 where
+  data PackedBits 256 = PackedBits256
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    deriving (Show)
+
+  packedBitsZero _ = PackedBits256 0 0 0 0
+
+  getWord64IxUnsafe i (PackedBits256 a b c d) = case i of
+    0 -> a
+    1 -> b
+    2 -> c
+    3 -> d
+    _ -> boundError (Proxy @256) i
+
+  setWord64IxUnsafe i v (PackedBits256 a b c d) = case i of
+    0 -> PackedBits256 v b c d
+    1 -> PackedBits256 a v c d
+    2 -> PackedBits256 a b v d
+    3 -> PackedBits256 a b c v
+    _ -> boundError (Proxy @256) i
+
+instance PackedBitsLen 320 where
+  data PackedBits 320 = PackedBits320
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    {-# UNPACK #-} !Word64
+    deriving (Show)
+
+  packedBitsZero _ = PackedBits320 0 0 0 0 0
+
+  getWord64IxUnsafe i (PackedBits320 a b c d e) = case i of
+    0 -> a
+    1 -> b
+    2 -> c
+    3 -> d
+    4 -> e
+    _ -> boundError (Proxy @320) i
+
+  setWord64IxUnsafe i v (PackedBits320 a b c d e) = case i of
+    0 -> PackedBits320 v b c d e
+    1 -> PackedBits320 a v c d e
+    2 -> PackedBits320 a b v d e
+    3 -> PackedBits320 a b c v e
+    4 -> PackedBits320 a b c d v
+    _ -> boundError (Proxy @320) i
+
+
